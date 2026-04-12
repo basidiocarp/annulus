@@ -1,3 +1,4 @@
+mod config;
 mod statusline;
 mod validate_hooks;
 

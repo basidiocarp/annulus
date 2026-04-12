@@ -8,7 +8,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::Value;
 
-const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
+use crate::config::{StatuslineConfig, load_config};
+
+const TIERED_PRICING_THRESHOLD: usize = 200_000;
 
 #[derive(Debug, Default, Deserialize)]
 struct StatuslineInput {
@@ -74,6 +76,8 @@ struct Pricing {
     output_per_million: f64,
     cache_read_per_million: f64,
     cache_creation_per_million: f64,
+    cache_read_above_threshold: f64,
+    cache_creation_above_threshold: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,11 +119,13 @@ fn parse_statusline_input_from_reader<R: Read>(reader: R) -> Result<StatuslineIn
 }
 
 fn render_and_print(input: StatuslineInput, no_color: bool) {
-    let view = statusline_view(input);
-    println!("{}", render_statusline(&view, !no_color));
+    let config = load_config();
+    let view = statusline_view(input, &config);
+    let segments = segments_from_config(&config);
+    println!("{}", render_statusline(&view, !no_color, &segments));
 }
 
-fn statusline_view(input: StatuslineInput) -> StatuslineView {
+fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> StatuslineView {
     let transcript_usage = input
         .transcript_path
         .as_deref()
@@ -133,10 +139,11 @@ fn statusline_view(input: StatuslineInput) -> StatuslineView {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "unknown".to_string());
     let pricing = pricing_for_model(&model_name);
+    let context_limit = config.context_limit_for_model(&model_name);
     let context_pct = transcript_usage
         .and_then(|usage| usage.latest_assistant)
         .filter(|usage| usage.has_data())
-        .map(context_pct_for_usage);
+        .map(|usage| context_pct_for_usage(usage, context_limit));
     let cost = usage
         .zip(pricing)
         .map(|(usage, pricing)| cost_for_usage(usage, pricing));
@@ -219,8 +226,8 @@ fn is_assistant_entry(entry: &Value) -> bool {
     clippy::cast_sign_loss,
     reason = "Statusline percentage is presentation-only and explicitly clamped"
 )]
-fn context_pct_for_usage(usage: TokenUsage) -> u8 {
-    let pct = ((usage.prompt_tokens() as f64 / DEFAULT_CONTEXT_LIMIT as f64) * 100.0).round();
+fn context_pct_for_usage(usage: TokenUsage, context_limit: usize) -> u8 {
+    let pct = ((usage.prompt_tokens() as f64 / context_limit as f64) * 100.0).round();
     pct.clamp(0.0, 999.0) as u8
 }
 
@@ -240,6 +247,8 @@ fn pricing_for_model(display_name: &str) -> Option<Pricing> {
             output_per_million: 75.0,
             cache_read_per_million: 1.5,
             cache_creation_per_million: 18.75,
+            cache_read_above_threshold: 2.5,
+            cache_creation_above_threshold: 25.0,
         })
     } else if normalized.contains("sonnet") {
         Some(Pricing {
@@ -247,6 +256,8 @@ fn pricing_for_model(display_name: &str) -> Option<Pricing> {
             output_per_million: 15.0,
             cache_read_per_million: 0.30,
             cache_creation_per_million: 3.75,
+            cache_read_above_threshold: 0.50,
+            cache_creation_above_threshold: 5.0,
         })
     } else if normalized.contains("haiku") {
         Some(Pricing {
@@ -254,6 +265,8 @@ fn pricing_for_model(display_name: &str) -> Option<Pricing> {
             output_per_million: 4.0,
             cache_read_per_million: 0.08,
             cache_creation_per_million: 1.0,
+            cache_read_above_threshold: 0.13,
+            cache_creation_above_threshold: 1.30,
         })
     } else {
         None
@@ -265,10 +278,23 @@ fn pricing_for_model(display_name: &str) -> Option<Pricing> {
     reason = "Statusline cost is a coarse UI estimate derived from token counts"
 )]
 fn cost_for_usage(usage: TokenUsage, pricing: Pricing) -> f64 {
+    let prompt_tokens = usage.prompt_tokens();
+    let (cache_read_rate, cache_creation_rate) = if prompt_tokens > TIERED_PRICING_THRESHOLD {
+        (
+            pricing.cache_read_above_threshold,
+            pricing.cache_creation_above_threshold,
+        )
+    } else {
+        (
+            pricing.cache_read_per_million,
+            pricing.cache_creation_per_million,
+        )
+    };
+
     ((usage.input_tokens as f64 * pricing.input_per_million)
         + (usage.output_tokens as f64 * pricing.output_per_million)
-        + (usage.cache_read_input_tokens as f64 * pricing.cache_read_per_million)
-        + (usage.cache_creation_input_tokens as f64 * pricing.cache_creation_per_million))
+        + (usage.cache_read_input_tokens as f64 * cache_read_rate)
+        + (usage.cache_creation_input_tokens as f64 * cache_creation_rate))
         / 1_000_000.0
 }
 
@@ -355,56 +381,234 @@ fn mycelium_db_path() -> Result<PathBuf> {
     )?)
 }
 
-fn render_statusline(view: &StatuslineView, color: bool) -> String {
-    let context = match view.context_pct {
-        Some(pct) => format!("ctx: ▲ {pct}%"),
-        None => "ctx: --".to_string(),
-    };
-    let context_code = match view.context_pct {
-        Some(pct) if pct >= 85 => "31",
-        Some(pct) if pct >= 60 => "33",
-        Some(_) => "32",
-        None => "2",
-    };
-    let usage = match view.usage {
-        Some(usage) => format!(
-            "in: {} • out: {} • cache: {}",
-            format_tokens(usage.input_tokens),
-            format_tokens(usage.output_tokens),
-            format_tokens(usage.cache_read_input_tokens + usage.cache_creation_input_tokens)
-        ),
-        None => "--".to_string(),
-    };
-    let cost = view
-        .cost
-        .map_or_else(|| "--".to_string(), |cost| format!("${cost:.2}"));
-    let line_one = [
-        paint(&context, context_code, color),
-        paint(&usage, "36", color),
-        paint(&cost, "35", color),
+trait Segment {
+    #[allow(dead_code)]
+    fn name(&self) -> &'static str;
+    fn render(&self, view: &StatuslineView, color: bool) -> Option<String>;
+    fn line(&self) -> u8;
+}
+
+struct ContextSegment;
+impl Segment for ContextSegment {
+    fn name(&self) -> &'static str {
+        "context"
+    }
+    fn line(&self) -> u8 {
+        1
+    }
+    fn render(&self, view: &StatuslineView, color: bool) -> Option<String> {
+        let context = match view.context_pct {
+            Some(pct) => format!("ctx: ▲ {pct}%"),
+            None => "ctx: --".to_string(),
+        };
+        let context_code = match view.context_pct {
+            Some(pct) if pct >= 85 => "31",
+            Some(pct) if pct >= 60 => "33",
+            Some(_) => "32",
+            None => "2",
+        };
+        Some(paint(&context, context_code, color))
+    }
+}
+
+struct UsageSegment;
+impl Segment for UsageSegment {
+    fn name(&self) -> &'static str {
+        "usage"
+    }
+    fn line(&self) -> u8 {
+        1
+    }
+    fn render(&self, view: &StatuslineView, color: bool) -> Option<String> {
+        let usage = match view.usage {
+            Some(usage) => format!(
+                "in: {} • out: {} • cache: {}",
+                format_tokens(usage.input_tokens),
+                format_tokens(usage.output_tokens),
+                format_tokens(usage.cache_read_input_tokens + usage.cache_creation_input_tokens)
+            ),
+            None => "--".to_string(),
+        };
+        Some(paint(&usage, "36", color))
+    }
+}
+
+struct CostSegment;
+impl Segment for CostSegment {
+    fn name(&self) -> &'static str {
+        "cost"
+    }
+    fn line(&self) -> u8 {
+        1
+    }
+    fn render(&self, view: &StatuslineView, color: bool) -> Option<String> {
+        let cost = view
+            .cost
+            .map_or_else(|| "--".to_string(), |cost| format!("${cost:.2}"));
+        Some(paint(&cost, "35", color))
+    }
+}
+
+struct ModelSegment;
+impl Segment for ModelSegment {
+    fn name(&self) -> &'static str {
+        "model"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    fn render(&self, view: &StatuslineView, color: bool) -> Option<String> {
+        Some(paint(&view.model_name, "34", color))
+    }
+}
+
+struct SavingsSegment;
+impl Segment for SavingsSegment {
+    fn name(&self) -> &'static str {
+        "savings"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    fn render(&self, view: &StatuslineView, color: bool) -> Option<String> {
+        view.savings.as_ref().map(|savings| {
+            paint(
+                &format!("↓{} saved", format_tokens(savings.saved_tokens)),
+                "32",
+                color,
+            )
+        })
+    }
+}
+
+struct BranchSegment;
+impl Segment for BranchSegment {
+    fn name(&self) -> &'static str {
+        "branch"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    fn render(&self, view: &StatuslineView, color: bool) -> Option<String> {
+        view.branch
+            .as_ref()
+            .map(|branch| paint(&format!("git: {branch}"), "2", color))
+    }
+}
+
+struct WorkspaceSegment;
+impl Segment for WorkspaceSegment {
+    fn name(&self) -> &'static str {
+        "workspace"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    fn render(&self, view: &StatuslineView, color: bool) -> Option<String> {
+        view.workspace_name
+            .as_ref()
+            .map(|name| paint(&format!("ws: {name}"), "2", color))
+    }
+}
+
+struct ContextBarSegment;
+impl Segment for ContextBarSegment {
+    fn name(&self) -> &'static str {
+        "context-bar"
+    }
+    fn line(&self) -> u8 {
+        1
+    }
+    fn render(&self, view: &StatuslineView, color: bool) -> Option<String> {
+        let bar_width = 12;
+
+        let (filled, label, color_code) = match view.context_pct {
+            Some(pct) => {
+                let fill = (usize::from(pct) * bar_width) / 100;
+                let fill = fill.min(bar_width);
+                let code = if pct >= 85 {
+                    "31"
+                } else if pct >= 60 {
+                    "33"
+                } else {
+                    "32"
+                };
+                (fill, format!("{pct}%"), code)
+            }
+            None => (0, "--".to_string(), "2"),
+        };
+
+        let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
+        Some(paint(&format!("[ctx {bar} {label}]"), color_code, color))
+    }
+}
+
+fn default_segments() -> Vec<Box<dyn Segment>> {
+    vec![
+        Box::new(ContextSegment),
+        Box::new(UsageSegment),
+        Box::new(CostSegment),
+        Box::new(ModelSegment),
+        Box::new(SavingsSegment),
+        Box::new(BranchSegment),
+        Box::new(WorkspaceSegment),
+        Box::new(ContextBarSegment),
     ]
-    .join(" │ ");
+}
 
-    let mut line_two_segments = vec![paint(&view.model_name, "34", color)];
-
-    if let Some(savings) = &view.savings {
-        line_two_segments.push(paint(
-            &format!("↓{} saved", format_tokens(savings.saved_tokens)),
-            "32",
-            color,
-        ));
+fn segments_from_config(config: &StatuslineConfig) -> Vec<Box<dyn Segment>> {
+    if config.segments.is_empty() {
+        return default_segments();
     }
 
-    if let Some(branch) = &view.branch {
-        line_two_segments.push(paint(&format!("git: {branch}"), "2", color));
+    let mut segments: Vec<Box<dyn Segment>> = vec![];
+    for entry in &config.segments {
+        if !entry.enabled {
+            continue;
+        }
+        let segment: Option<Box<dyn Segment>> = match entry.name.as_str() {
+            "context" => Some(Box::new(ContextSegment)),
+            "usage" => Some(Box::new(UsageSegment)),
+            "cost" => Some(Box::new(CostSegment)),
+            "model" => Some(Box::new(ModelSegment)),
+            "savings" => Some(Box::new(SavingsSegment)),
+            "branch" => Some(Box::new(BranchSegment)),
+            "workspace" => Some(Box::new(WorkspaceSegment)),
+            "context-bar" => Some(Box::new(ContextBarSegment)),
+            _ => None,
+        };
+        if let Some(seg) = segment {
+            segments.push(seg);
+        }
     }
 
-    if let Some(workspace_name) = &view.workspace_name {
-        line_two_segments.push(paint(&format!("ws: {workspace_name}"), "2", color));
+    if segments.is_empty() {
+        default_segments()
+    } else {
+        segments
     }
+}
 
-    let line_two = line_two_segments.join(" │ ");
-    format!("{line_one}\n{line_two}")
+fn render_statusline(view: &StatuslineView, color: bool, segments: &[Box<dyn Segment>]) -> String {
+    let line_one: Vec<String> = segments
+        .iter()
+        .filter(|s| s.line() == 1)
+        .filter_map(|s| s.render(view, color))
+        .collect();
+    let line_two: Vec<String> = segments
+        .iter()
+        .filter(|s| s.line() == 2)
+        .filter_map(|s| s.render(view, color))
+        .collect();
+
+    let line_one = line_one.join(" │ ");
+    let line_two = line_two.join(" │ ");
+
+    if line_two.is_empty() {
+        line_one
+    } else {
+        format!("{line_one}\n{line_two}")
+    }
 }
 
 #[allow(
@@ -558,13 +762,17 @@ mod tests {
         )
         .unwrap();
 
-        let view = statusline_view(StatuslineInput {
-            transcript_path: Some(transcript.to_string_lossy().to_string()),
-            model: Some(StatuslineModel {
-                display_name: Some("Claude Sonnet 4.6".to_string()),
-            }),
-            workspace: None,
-        });
+        let config = StatuslineConfig::default();
+        let view = statusline_view(
+            StatuslineInput {
+                transcript_path: Some(transcript.to_string_lossy().to_string()),
+                model: Some(StatuslineModel {
+                    display_name: Some("Claude Sonnet 4.6".to_string()),
+                }),
+                workspace: None,
+            },
+            &config,
+        );
 
         assert_eq!(view.context_pct, Some(67));
         assert_eq!(
@@ -580,6 +788,7 @@ mod tests {
 
     #[test]
     fn render_statusline_without_color_is_compact() {
+        let segments = default_segments();
         let line = render_statusline(
             &StatuslineView {
                 context_pct: Some(42),
@@ -599,16 +808,18 @@ mod tests {
                 }),
             },
             false,
+            &segments,
         );
 
         assert_eq!(
             line,
-            "ctx: ▲ 42% │ in: 45.0K • out: 12.0K • cache: 89.0K │ $1.23\nsonnet 4.6 │ ↓8.2K saved │ git: main │ ws: basidiocarp"
+            "ctx: ▲ 42% │ in: 45.0K • out: 12.0K • cache: 89.0K │ $1.23 │ [ctx █████░░░░░░░ 42%]\nsonnet 4.6 │ ↓8.2K saved │ git: main │ ws: basidiocarp"
         );
     }
 
     #[test]
     fn render_statusline_degrades_gracefully() {
+        let segments = default_segments();
         let line = render_statusline(
             &StatuslineView {
                 context_pct: None,
@@ -620,9 +831,10 @@ mod tests {
                 savings: None,
             },
             false,
+            &segments,
         );
 
-        assert_eq!(line, "ctx: -- │ -- │ --\nunknown");
+        assert_eq!(line, "ctx: -- │ -- │ -- │ [ctx ░░░░░░░░░░░░ --]\nunknown");
     }
 
     #[test]
@@ -660,5 +872,120 @@ mod tests {
         assert_eq!(stat.input_tokens, 1500);
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn cost_for_usage_below_threshold_uses_base_rates() {
+        let usage = TokenUsage {
+            input_tokens: 50_000,
+            output_tokens: 10_000,
+            cache_read_input_tokens: 80_000,
+            cache_creation_input_tokens: 10_000,
+        };
+        let pricing = pricing_for_model("sonnet").unwrap();
+        let cost = cost_for_usage(usage, pricing);
+        // prompt_tokens = 50k + 80k + 10k = 140k (below 200k)
+        // (50000*3 + 10000*15 + 80000*0.30 + 10000*3.75) / 1_000_000
+        let expected =
+            (50_000.0 * 3.0 + 10_000.0 * 15.0 + 80_000.0 * 0.30 + 10_000.0 * 3.75) / 1_000_000.0;
+        assert!(
+            (cost - expected).abs() < 0.001,
+            "cost={cost}, expected={expected}"
+        );
+    }
+
+    #[test]
+    fn cost_for_usage_at_threshold_uses_base_rates() {
+        let usage = TokenUsage {
+            input_tokens: 100_000,
+            output_tokens: 5_000,
+            cache_read_input_tokens: 80_000,
+            cache_creation_input_tokens: 20_000,
+        };
+        let pricing = pricing_for_model("sonnet").unwrap();
+        let cost = cost_for_usage(usage, pricing);
+        // prompt_tokens = 100k + 80k + 20k = 200k (at threshold, not above)
+        let expected =
+            (100_000.0 * 3.0 + 5_000.0 * 15.0 + 80_000.0 * 0.30 + 20_000.0 * 3.75) / 1_000_000.0;
+        assert!(
+            (cost - expected).abs() < 0.001,
+            "cost={cost}, expected={expected}"
+        );
+    }
+
+    #[test]
+    fn cost_for_usage_above_threshold_uses_tiered_rates() {
+        let usage = TokenUsage {
+            input_tokens: 100_000,
+            output_tokens: 10_000,
+            cache_read_input_tokens: 90_000,
+            cache_creation_input_tokens: 20_000,
+        };
+        let pricing = pricing_for_model("sonnet").unwrap();
+        let cost = cost_for_usage(usage, pricing);
+        // prompt_tokens = 100k + 90k + 20k = 210k (above 200k)
+        // cache uses above-threshold rates: cache_read=0.50, cache_creation=5.00
+        let expected =
+            (100_000.0 * 3.0 + 10_000.0 * 15.0 + 90_000.0 * 0.50 + 20_000.0 * 5.0) / 1_000_000.0;
+        assert!(
+            (cost - expected).abs() < 0.001,
+            "cost={cost}, expected={expected}"
+        );
+    }
+
+    fn default_view() -> StatuslineView {
+        StatuslineView {
+            context_pct: None,
+            usage: None,
+            cost: None,
+            model_name: "unknown".to_string(),
+            branch: None,
+            workspace_name: None,
+            savings: None,
+        }
+    }
+
+    #[test]
+    fn context_bar_renders_progress_at_normal_level() {
+        let view = StatuslineView {
+            context_pct: Some(42),
+            ..default_view()
+        };
+        let segment = ContextBarSegment;
+        let output = segment.render(&view, false).unwrap();
+        assert_eq!(output, "[ctx █████░░░░░░░ 42%]");
+    }
+
+    #[test]
+    fn context_bar_renders_warning_zone() {
+        let view = StatuslineView {
+            context_pct: Some(75),
+            ..default_view()
+        };
+        let segment = ContextBarSegment;
+        let output = segment.render(&view, false).unwrap();
+        assert_eq!(output, "[ctx █████████░░░ 75%]");
+    }
+
+    #[test]
+    fn context_bar_renders_critical_at_eighty_five_percent() {
+        let view = StatuslineView {
+            context_pct: Some(95),
+            ..default_view()
+        };
+        let segment = ContextBarSegment;
+        let output = segment.render(&view, false).unwrap();
+        assert_eq!(output, "[ctx ███████████░ 95%]");
+    }
+
+    #[test]
+    fn context_bar_renders_empty_when_no_data() {
+        let view = StatuslineView {
+            context_pct: None,
+            ..default_view()
+        };
+        let segment = ContextBarSegment;
+        let output = segment.render(&view, false).unwrap();
+        assert_eq!(output, "[ctx ░░░░░░░░░░░░ --]");
     }
 }
