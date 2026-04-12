@@ -1,7 +1,6 @@
 mod statusline;
 mod validate_hooks;
 
-use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -16,16 +15,25 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Print statusline information
-    Statusline,
+    Statusline {
+        /// Disable color output
+        #[arg(long)]
+        no_color: bool,
+    },
     /// Validate hooks configuration
     ValidateHooks,
 }
 
-fn main() -> Result<()> {
+fn main() {
     let cli = Cli::parse();
 
-    match cli.command {
-        Command::Statusline => statusline::run(),
+    let result = match cli.command {
+        Command::Statusline { no_color } => statusline::handle_stdin(no_color),
         Command::ValidateHooks => validate_hooks::run(),
+    };
+
+    if let Err(e) = result {
+        eprintln!("Error: {e:?}");
+        std::process::exit(1);
     }
 }
