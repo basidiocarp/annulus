@@ -1,0 +1,34 @@
+[package]
+name = "annulus"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["William Newton"]
+description = "Cross-ecosystem operator utilities for the Basidiocarp ecosystem"
+license = "MIT"
+repository = "https://github.com/basidiocarp/annulus"
+keywords = ["basidiocarp", "agents", "statusline", "validation", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+publish = false
+
+[[bin]]
+name = "annulus"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
