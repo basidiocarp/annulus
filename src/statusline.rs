@@ -228,7 +228,7 @@ fn is_assistant_entry(entry: &Value) -> bool {
 )]
 fn context_pct_for_usage(usage: TokenUsage, context_limit: usize) -> u8 {
     let pct = ((usage.prompt_tokens() as f64 / context_limit as f64) * 100.0).round();
-    pct.clamp(0.0, 999.0) as u8
+    pct.clamp(0.0, 255.0) as u8
 }
 
 fn usage_field(usage: Option<&Value>, field: &str) -> usize {
@@ -524,7 +524,11 @@ impl Segment for ContextBarSegment {
 
         let (filled, label, color_code) = match view.context_pct {
             Some(pct) => {
-                let fill = (usize::from(pct) * bar_width) / 100;
+                let fill = if pct > 0 {
+                    ((usize::from(pct) * bar_width) / 100).max(1)
+                } else {
+                    0
+                };
                 let fill = fill.min(bar_width);
                 let code = if pct >= 85 {
                     "31"
@@ -582,11 +586,7 @@ fn segments_from_config(config: &StatuslineConfig) -> Vec<Box<dyn Segment>> {
         }
     }
 
-    if segments.is_empty() {
-        default_segments()
-    } else {
-        segments
-    }
+    segments
 }
 
 fn render_statusline(view: &StatuslineView, color: bool, segments: &[Box<dyn Segment>]) -> String {
@@ -784,6 +784,32 @@ mod tests {
                 cache_creation_input_tokens: 19_000,
             })
         );
+    }
+
+    #[test]
+    fn statusline_view_uses_custom_context_limit_from_config() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let transcript = temp_dir.path().join("transcript.jsonl");
+        fs::write(
+            &transcript,
+            "{\"type\":\"assistant\",\"usage\":{\"input_tokens\":50000,\"output_tokens\":10000,\"cache_read_input_tokens\":30000,\"cache_creation_input_tokens\":10000}}\n",
+        ).unwrap();
+
+        let mut config = StatuslineConfig::default();
+        config.context_limits.insert("sonnet".to_string(), 100_000);
+
+        let view = statusline_view(
+            StatuslineInput {
+                transcript_path: Some(transcript.to_string_lossy().to_string()),
+                model: Some(StatuslineModel {
+                    display_name: Some("Claude Sonnet 4.6".to_string()),
+                }),
+                workspace: None,
+            },
+            &config,
+        );
+
+        assert_eq!(view.context_pct, Some(90));
     }
 
     #[test]

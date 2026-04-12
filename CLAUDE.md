@@ -32,7 +32,7 @@ Annulus is a small Rust binary providing cross-ecosystem operator utilities for 
 
 | What | Path |
 |------|------|
-| Config file | `~/.config/annulus/config.toml` (future) |
+| Config file | `~/.config/annulus/statusline.toml` |
 | Log output | stderr |
 
 Annulus is read-only by design. It does not maintain its own database or persistent state.
