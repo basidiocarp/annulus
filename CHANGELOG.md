@@ -4,6 +4,15 @@ All notable changes to Annulus are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-12
+
+### Added
+
+- **Config-driven statusline**: loads segment ordering, visibility, and model-specific context limits from `~/.config/annulus/statusline.toml`.
+- **Segment trait and registry**: refactored hardcoded render blocks into a composable trait-based registry with `segments_from_config()`.
+- **Context window progress bar**: visual `[ctx ████████░░░░ 67%]` segment with model-aware limits and color thresholds.
+- **Tiered pricing**: cache token rates above 200k prompt tokens match Claude's actual billing tiers.
+
 ## [0.2.0] - 2026-04-11
 
 ### Added
