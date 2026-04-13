@@ -1,0 +1,81 @@
+[
+  {
+    "role": "user",
+    "parts": [
+      {
+        "text": "[REDACTED: user prompt turn 1]"
+      }
+    ]
+  },
+  {
+    "role": "model",
+    "parts": [
+      {
+        "text": "[REDACTED: model reply turn 1]"
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 312,
+      "candidatesTokenCount": 87,
+      "totalTokenCount": 399
+    }
+  },
+  {
+    "role": "user",
+    "parts": [
+      {
+        "text": "[REDACTED: user prompt turn 2]"
+      }
+    ]
+  },
+  {
+    "role": "model",
+    "parts": [
+      {
+        "text": "[REDACTED: model reply turn 2]"
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 847,
+      "candidatesTokenCount": 203,
+      "totalTokenCount": 1050
+    }
+  },
+  {
+    "role": "user",
+    "parts": [
+      {
+        "text": "[REDACTED: user prompt turn 3]"
+      }
+    ]
+  },
+  {
+    "role": "model",
+    "parts": [
+      {
+        "text": "[REDACTED: model reply turn 3 — tool use, no usageMetadata]"
+      }
+    ]
+  },
+  {
+    "role": "user",
+    "parts": [
+      {
+        "text": "[REDACTED: user prompt turn 4]"
+      }
+    ]
+  },
+  {
+    "role": "model",
+    "parts": [
+      {
+        "text": "[REDACTED: model reply turn 4]"
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 1534,
+      "candidatesTokenCount": 411,
+      "totalTokenCount": 1945
+    }
+  }
+]
