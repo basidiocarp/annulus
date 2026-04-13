@@ -424,6 +424,19 @@ impl TokenProvider for ClaudeProvider {
             cache_creation_tokens: usage.cumulative.cache_creation_input_tokens,
         }))
     }
+
+    /// Returns the mtime (seconds since Unix epoch) of the transcript file,
+    /// or `None` when no transcript path is set or the file is unreadable.
+    ///
+    /// Using file mtime is cheap — no parsing required — and is sufficient for
+    /// the coarse recency comparison in `detect_provider`.
+    fn last_session_at(&self) -> Option<u64> {
+        let path = self.transcript_path.as_deref()?;
+        let meta = std::fs::metadata(path).ok()?;
+        let mtime = meta.modified().ok()?;
+        let secs = mtime.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+        Some(secs)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -613,6 +626,41 @@ mod tests {
         let provider = ClaudeProvider::default();
         let usage = provider.session_usage().expect("no error");
         assert!(usage.is_none());
+    }
+
+    // ── ClaudeProvider::last_session_at ───────────────────────────────────────
+
+    #[test]
+    fn claude_last_session_at_returns_mtime() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = write_transcript(dir.path(), "mtime.jsonl", "{}");
+        let provider = ClaudeProvider {
+            transcript_path: Some(path.to_str().unwrap().to_string()),
+        };
+        let ts = provider.last_session_at();
+        assert!(ts.is_some(), "should return mtime for an existing file");
+        // Sanity: mtime should be a plausible Unix timestamp (after 2020-01-01).
+        assert!(
+            ts.unwrap() > 1_577_836_800,
+            "mtime should be after 2020-01-01"
+        );
+    }
+
+    #[test]
+    fn claude_last_session_at_returns_none_without_path() {
+        let provider = ClaudeProvider::default();
+        assert!(
+            provider.last_session_at().is_none(),
+            "no transcript path → None"
+        );
+    }
+
+    #[test]
+    fn claude_last_session_at_returns_none_for_missing_file() {
+        let provider = ClaudeProvider {
+            transcript_path: Some("/tmp/nonexistent-annulus-test-file.jsonl".to_string()),
+        };
+        assert!(provider.last_session_at().is_none(), "missing file → None");
     }
 
     // ── ISO 8601 timestamp support (regression: real Claude transcripts) ──────

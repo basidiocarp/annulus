@@ -49,16 +49,27 @@ pub trait TokenProvider {
     /// Returns `Ok(None)` when the provider is available but has no data for
     /// the current session (e.g. Codex stub before format parsing is wired).
     fn session_usage(&self) -> anyhow::Result<Option<TokenUsage>>;
+
+    /// Unix timestamp (seconds) of the provider's most recent session activity,
+    /// or `None` if the provider cannot determine recency.
+    ///
+    /// Used by the auto-detect path to prefer the most recently active
+    /// provider. Stub providers that return `None` are skipped during recency
+    /// comparison and fall through to the Claude default.
+    fn last_session_at(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Select a provider based on an explicit name or auto-detection.
 ///
-/// # Auto-detection (current pass)
+/// # Auto-detection
 ///
-/// Auto-detect always returns `ClaudeProvider` in this pass because Codex and
-/// Gemini providers return `Ok(None)`. When those providers gain real data
-/// parsing, the selection should prefer the provider whose data source has the
-/// most-recent session activity.
+/// When no explicit provider is configured, builds the candidate set (Claude,
+/// Codex, Gemini), filters to those that are available, and picks the one with
+/// the highest `last_session_at` timestamp. Ties resolve in declaration order
+/// (Claude wins). If every available provider returns `None` for recency, Claude
+/// is returned as the default.
 ///
 /// # Explicit selection
 ///
@@ -71,8 +82,56 @@ pub fn detect_provider(explicit: Option<&str>) -> Box<dyn TokenProvider> {
     match explicit {
         Some("codex") => Box::new(CodexProvider::new()),
         Some("gemini") => Box::new(GeminiProvider::new()),
-        // "claude" or any unrecognised value falls through to Claude.
-        Some(_) | None => Box::new(ClaudeProvider::default()),
+        // "claude" or any unrecognised value falls through to explicit Claude.
+        Some(_) => Box::new(ClaudeProvider::default()),
+        None => detect_by_recency(),
+    }
+}
+
+/// Auto-detect the most recently active available provider.
+///
+/// Candidates are evaluated in declaration order so that ties favour Claude.
+/// Providers returning `None` from `last_session_at` are skipped; if all
+/// return `None`, Claude is the fallback.
+fn detect_by_recency() -> Box<dyn TokenProvider> {
+    // Build candidates in preference order (Claude first for tie-breaking).
+    let candidates: Vec<Box<dyn TokenProvider>> = vec![
+        Box::new(ClaudeProvider::default()),
+        Box::new(CodexProvider::new()),
+        Box::new(GeminiProvider::new()),
+    ];
+
+    // Among available providers that report a timestamp, take the most recent.
+    // `max_by_key` over an iterator picks the last maximum in case of ties, so
+    // we reverse the iteration order: candidates are in preference order
+    // (Claude first), and we want Claude to win ties, so we fold manually.
+    let mut best_ts: Option<u64> = None;
+    let mut best_idx: usize = 0; // index into candidates that holds the winner
+
+    for (i, candidate) in candidates.iter().enumerate() {
+        if !candidate.is_available() {
+            continue;
+        }
+        let Some(ts) = candidate.last_session_at() else {
+            continue;
+        };
+        // Strictly greater — equal timestamps keep the earlier (higher-priority) candidate.
+        if best_ts.is_none_or(|prev| ts > prev) {
+            best_ts = Some(ts);
+            best_idx = i;
+        }
+    }
+
+    // If any candidate had a timestamp, use the winner; otherwise fall back to Claude.
+    if best_ts.is_some() {
+        // Consume the winner by rebuilding it — we can't move out of a Vec<Box<dyn ...>>.
+        match best_idx {
+            1 => Box::new(CodexProvider::new()),
+            2 => Box::new(GeminiProvider::new()),
+            _ => Box::new(ClaudeProvider::default()),
+        }
+    } else {
+        Box::new(ClaudeProvider::default())
     }
 }
 
@@ -125,5 +184,147 @@ mod tests {
             result.unwrap().is_none(),
             "gemini should return None in this pass"
         );
+    }
+
+    // ── detect_provider recency tests (using mock providers) ─────────────────
+
+    /// A minimal mock provider for testing recency-based detection.
+    struct MockProvider {
+        name: &'static str,
+        available: bool,
+        last_session: Option<u64>,
+    }
+
+    impl TokenProvider for MockProvider {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn is_available(&self) -> bool {
+            self.available
+        }
+
+        fn session_usage(&self) -> anyhow::Result<Option<TokenUsage>> {
+            Ok(None)
+        }
+
+        fn last_session_at(&self) -> Option<u64> {
+            self.last_session
+        }
+    }
+
+    #[test]
+    fn stub_last_session_at_is_none() {
+        // Stub providers (Codex, Gemini) must return None by default.
+        let codex = CodexProvider::new();
+        let gemini = GeminiProvider::new();
+        assert!(codex.last_session_at().is_none());
+        assert!(gemini.last_session_at().is_none());
+    }
+
+    #[test]
+    fn detect_provider_all_none_recency_falls_through_to_claude() {
+        // All providers return None for last_session_at — must not panic and must
+        // return Claude.
+        let provider = detect_provider(None);
+        assert_eq!(provider.name(), "claude");
+    }
+
+    #[test]
+    fn mock_more_recent_wins_over_older() {
+        // Verify that the recency comparison logic picks the higher timestamp.
+        let older = MockProvider {
+            name: "older",
+            available: true,
+            last_session: Some(1_000),
+        };
+        let newer = MockProvider {
+            name: "newer",
+            available: true,
+            last_session: Some(2_000),
+        };
+
+        // Fold manually (same logic as detect_by_recency).
+        let candidates: Vec<&dyn TokenProvider> = vec![&older, &newer];
+        let mut best_ts: Option<u64> = None;
+        let mut best_name = "";
+        for c in &candidates {
+            if !c.is_available() {
+                continue;
+            }
+            let Some(ts) = c.last_session_at() else {
+                continue;
+            };
+            if best_ts.is_none_or(|prev| ts > prev) {
+                best_ts = Some(ts);
+                best_name = c.name();
+            }
+        }
+        assert_eq!(best_name, "newer");
+    }
+
+    #[test]
+    fn mock_tie_prefers_earlier_declaration_order() {
+        // Equal timestamps: the first candidate (higher priority) must win.
+        let first = MockProvider {
+            name: "first",
+            available: true,
+            last_session: Some(1_000),
+        };
+        let second = MockProvider {
+            name: "second",
+            available: true,
+            last_session: Some(1_000),
+        };
+
+        let candidates: Vec<&dyn TokenProvider> = vec![&first, &second];
+        let mut best_ts: Option<u64> = None;
+        let mut best_name = "";
+        for c in &candidates {
+            if !c.is_available() {
+                continue;
+            }
+            let Some(ts) = c.last_session_at() else {
+                continue;
+            };
+            if best_ts.is_none_or(|prev| ts > prev) {
+                best_ts = Some(ts);
+                best_name = c.name();
+            }
+        }
+        // Tie: "first" wins because "second" is not strictly greater.
+        assert_eq!(best_name, "first");
+    }
+
+    #[test]
+    fn mock_unavailable_provider_is_skipped() {
+        // An unavailable provider must not be selected even if it has a newer timestamp.
+        let unavailable = MockProvider {
+            name: "unavailable",
+            available: false,
+            last_session: Some(9_999_999),
+        };
+        let available = MockProvider {
+            name: "available",
+            available: true,
+            last_session: Some(1_000),
+        };
+
+        let candidates: Vec<&dyn TokenProvider> = vec![&unavailable, &available];
+        let mut best_ts: Option<u64> = None;
+        let mut best_name = "";
+        for c in &candidates {
+            if !c.is_available() {
+                continue;
+            }
+            let Some(ts) = c.last_session_at() else {
+                continue;
+            };
+            if best_ts.is_none_or(|prev| ts > prev) {
+                best_ts = Some(ts);
+                best_name = c.name();
+            }
+        }
+        assert_eq!(best_name, "available");
     }
 }
