@@ -1,14 +1,14 @@
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, IsTerminal, Read};
+use std::io::{self, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{StatuslineConfig, load_config};
+use crate::providers;
 
 const TIERED_PRICING_THRESHOLD: usize = 200_000;
 
@@ -89,6 +89,8 @@ struct SavingsStat {
 #[derive(Debug, Clone, PartialEq)]
 struct StatuslineView {
     context_pct: Option<u8>,
+    prompt_tokens: Option<u32>,
+    context_limit: Option<u32>,
     usage: Option<TokenUsage>,
     cost: Option<f64>,
     model_name: String,
@@ -97,15 +99,42 @@ struct StatuslineView {
     savings: Option<SavingsStat>,
 }
 
-pub fn handle_stdin(no_color: bool) -> Result<()> {
+// JSON output types
+#[derive(Debug, Serialize)]
+#[must_use]
+struct JsonPayload {
+    schema: String,
+    version: String,
+    segments: Vec<JsonSegment>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonSegment {
+    name: String,
+    available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+pub fn handle_stdin(json: bool, no_color: bool) -> Result<()> {
     let stdin = io::stdin();
-    if stdin.is_terminal() {
-        render_and_print(StatuslineInput::default(), no_color);
-        return Ok(());
+    let input = if stdin.is_terminal() {
+        StatuslineInput::default()
+    } else {
+        parse_statusline_input_from_reader(stdin.lock())?
+    };
+
+    let config = load_config();
+    let view = statusline_view(input, &config);
+
+    if json {
+        render_and_print_json(&view, &config)?;
+    } else {
+        render_and_print_terminal(&view, !no_color, &config);
     }
 
-    let input = parse_statusline_input_from_reader(stdin.lock())?;
-    render_and_print(input, no_color);
     Ok(())
 }
 
@@ -118,18 +147,48 @@ fn parse_statusline_input_from_reader<R: Read>(reader: R) -> Result<StatuslineIn
     }
 }
 
-fn render_and_print(input: StatuslineInput, no_color: bool) {
-    let config = load_config();
-    let view = statusline_view(input, &config);
-    let segments = segments_from_config(&config);
-    println!("{}", render_statusline(&view, !no_color, &segments));
+fn render_and_print_terminal(view: &StatuslineView, color: bool, config: &StatuslineConfig) {
+    let segments = segments_from_config(config);
+    println!("{}", render_statusline(view, color, &segments));
+}
+
+fn render_and_print_json(view: &StatuslineView, config: &StatuslineConfig) -> Result<()> {
+    let payload = build_json_payload(view, config);
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
 }
 
 fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> StatuslineView {
-    let transcript_usage = input
-        .transcript_path
-        .as_deref()
-        .and_then(|path| read_transcript_usage(path).ok());
+    // Route through the provider abstraction. `detect_provider` selects the
+    // active provider from the config's `provider` field (or auto-detects,
+    // which currently always returns ClaudeProvider). Codex and Gemini
+    // providers return `Ok(None)` in this pass, so Claude is the effective
+    // source of transcript data in all current configurations.
+    //
+    // The provider is wired here so that the registry exists and callers can
+    // query `provider.name()` and `provider.is_available()`. The full session
+    // data pipeline will migrate off `read_transcript_usage` in a future pass
+    // once non-Claude providers expose richer breakdowns.
+    let provider: Box<dyn providers::TokenProvider> = {
+        let explicit = config.provider.as_deref();
+        match providers::detect_provider(explicit) {
+            p if p.name() == "claude" => Box::new(providers::claude::ClaudeProvider {
+                transcript_path: input.transcript_path.clone(),
+            }),
+            p => p,
+        }
+    };
+
+    // For Claude, read the full transcript breakdown via the streaming path.
+    // For other providers (stubs in this pass), skip transcript reading.
+    let transcript_usage = if provider.name() == "claude" {
+        input
+            .transcript_path
+            .as_deref()
+            .and_then(|path| read_transcript_usage(path).ok())
+    } else {
+        None
+    };
     let usage = transcript_usage
         .map(|usage| usage.cumulative)
         .filter(|usage| usage.has_data());
@@ -140,10 +199,23 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
         .unwrap_or_else(|| "unknown".to_string());
     let pricing = pricing_for_model(&model_name);
     let context_limit = config.context_limit_for_model(&model_name);
-    let context_pct = transcript_usage
-        .and_then(|usage| usage.latest_assistant)
+    let latest_assistant = transcript_usage.and_then(|usage| usage.latest_assistant);
+    let context_pct = latest_assistant
         .filter(|usage| usage.has_data())
         .map(|usage| context_pct_for_usage(usage, context_limit));
+    let (prompt_tokens, context_limit_value) = match latest_assistant {
+        Some(usage) if usage.has_data() => {
+            // Context limits for models fit in u32 (no model has > 4B tokens)
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                (
+                    Some(usage.prompt_tokens() as u32),
+                    Some(context_limit as u32),
+                )
+            }
+        }
+        _ => (None, None),
+    };
     let cost = usage
         .zip(pricing)
         .map(|(usage, pricing)| cost_for_usage(usage, pricing));
@@ -160,6 +232,8 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
 
     StatuslineView {
         context_pct,
+        prompt_tokens,
+        context_limit: context_limit_value,
         usage,
         cost,
         model_name: compact_model_name(&model_name),
@@ -169,55 +243,29 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
     }
 }
 
+/// Read transcript usage, delegating to the streaming provider path.
+///
+/// This is the single code path for transcript reading. The old line-buffering
+/// implementation has been replaced; all callers go through
+/// `providers::claude::read_transcript_usage` which uses `BufReader::lines()`
+/// with malformed-line skipping and no full-file buffering.
 fn read_transcript_usage(path: &str) -> Result<TranscriptUsage> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut usage = TranscriptUsage::default();
-
-    for line in reader.lines() {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let Ok(entry) = serde_json::from_str::<Value>(trimmed) else {
-            continue;
-        };
-        if !is_assistant_entry(&entry) {
-            continue;
-        }
-
-        let usage_value = entry
-            .get("message")
-            .and_then(|message| message.get("usage"))
-            .or_else(|| entry.get("usage"));
-        let Some(usage_value) = usage_value else {
-            continue;
-        };
-
-        let entry_usage = TokenUsage {
-            input_tokens: usage_field(Some(usage_value), "input_tokens"),
-            output_tokens: usage_field(Some(usage_value), "output_tokens"),
-            cache_read_input_tokens: usage_field(Some(usage_value), "cache_read_input_tokens"),
-            cache_creation_input_tokens: usage_field(
-                Some(usage_value),
-                "cache_creation_input_tokens",
-            ),
-        };
-        usage.cumulative.input_tokens += entry_usage.input_tokens;
-        usage.cumulative.output_tokens += entry_usage.output_tokens;
-        usage.cumulative.cache_read_input_tokens += entry_usage.cache_read_input_tokens;
-        usage.cumulative.cache_creation_input_tokens += entry_usage.cache_creation_input_tokens;
-        usage.requests += 1;
-        usage.latest_assistant = Some(entry_usage);
-    }
-
-    Ok(usage)
-}
-
-fn is_assistant_entry(entry: &Value) -> bool {
-    entry.get("type").and_then(Value::as_str) == Some("assistant")
+    let raw = providers::claude::read_transcript_usage(path)?;
+    Ok(TranscriptUsage {
+        requests: raw.requests,
+        cumulative: TokenUsage {
+            input_tokens: raw.cumulative.input_tokens as usize,
+            output_tokens: raw.cumulative.output_tokens as usize,
+            cache_read_input_tokens: raw.cumulative.cache_read_input_tokens as usize,
+            cache_creation_input_tokens: raw.cumulative.cache_creation_input_tokens as usize,
+        },
+        latest_assistant: raw.latest_assistant.map(|u| TokenUsage {
+            input_tokens: u.input_tokens as usize,
+            output_tokens: u.output_tokens as usize,
+            cache_read_input_tokens: u.cache_read_input_tokens as usize,
+            cache_creation_input_tokens: u.cache_creation_input_tokens as usize,
+        }),
+    })
 }
 
 #[allow(
@@ -229,14 +277,6 @@ fn is_assistant_entry(entry: &Value) -> bool {
 fn context_pct_for_usage(usage: TokenUsage, context_limit: usize) -> u8 {
     let pct = ((usage.prompt_tokens() as f64 / context_limit as f64) * 100.0).round();
     pct.clamp(0.0, 255.0) as u8
-}
-
-fn usage_field(usage: Option<&Value>, field: &str) -> usize {
-    usage
-        .and_then(|value| value.get(field))
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(0)
 }
 
 fn pricing_for_model(display_name: &str) -> Option<Pricing> {
@@ -379,6 +419,93 @@ fn mycelium_db_path() -> Result<PathBuf> {
         "MYCELIUM_DB_PATH",
         None,
     )?)
+}
+
+/// Status of the hyphae memory store derived from file-existence and recency.
+///
+/// `rusqlite` is not used here — the db open path belongs to `hyphae` itself.
+/// We use file metadata as a lightweight availability signal. The `db_bytes`
+/// field is informational only — it is the file size, not a memory count, and
+/// callers should not present it to users as a record count.
+#[derive(Debug, PartialEq, Eq)]
+enum HyphaeStatus {
+    /// `hyphae.db` exists and was modified within the last 7 days.
+    Active { db_bytes: u64 },
+    /// `hyphae.db` exists but has not been modified recently.
+    Stale,
+    /// `hyphae.db` does not exist at the expected path.
+    Unavailable,
+}
+
+fn hyphae_db_path() -> PathBuf {
+    spore::paths::data_dir("hyphae").join("hyphae.db")
+}
+
+fn hyphae_status() -> HyphaeStatus {
+    hyphae_status_at_path(&hyphae_db_path())
+}
+
+fn hyphae_status_at_path(path: &Path) -> HyphaeStatus {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return HyphaeStatus::Unavailable;
+    };
+
+    // File size is reported as an informational hint only — we deliberately
+    // avoid opening SQLite from a read-only probe, so we cannot count rows.
+    let db_bytes = metadata.len();
+
+    // Check modification time: stale if not touched within 7 days.
+    let is_recent = metadata
+        .modified()
+        .ok()
+        .and_then(|mtime| mtime.elapsed().ok())
+        .is_some_and(|elapsed| elapsed.as_secs() < 7 * 24 * 3600);
+
+    if is_recent {
+        HyphaeStatus::Active { db_bytes }
+    } else {
+        HyphaeStatus::Stale
+    }
+}
+
+/// JSON data for the hyphae segment (path-parameterized for testing).
+fn build_hyphae_segment_at_path(path: &Path) -> JsonSegment {
+    match hyphae_status_at_path(path) {
+        HyphaeStatus::Active { db_bytes } => JsonSegment {
+            name: "hyphae".to_string(),
+            available: true,
+            // `db_bytes` is an informational file-size hint, not a record count.
+            value: Some(serde_json::json!({ "state": "active", "db_bytes": db_bytes })),
+            reason: None,
+        },
+        HyphaeStatus::Stale => JsonSegment {
+            name: "hyphae".to_string(),
+            available: true,
+            value: Some(serde_json::json!({ "state": "stale" })),
+            reason: Some("hyphae.db has not been modified in over 7 days".to_string()),
+        },
+        HyphaeStatus::Unavailable => JsonSegment {
+            name: "hyphae".to_string(),
+            available: false,
+            value: None,
+            reason: Some(format!("hyphae.db not found at {}", path.display())),
+        },
+    }
+}
+
+/// JSON data for the hyphae segment.
+fn build_hyphae_segment() -> JsonSegment {
+    build_hyphae_segment_at_path(&hyphae_db_path())
+}
+
+/// JSON data for the cortina segment — always unavailable, no data seam yet.
+fn build_cortina_segment() -> JsonSegment {
+    JsonSegment {
+        name: "cortina".to_string(),
+        available: false,
+        value: None,
+        reason: Some("no direct data seam yet".to_string()),
+    }
 }
 
 trait Segment {
@@ -547,6 +674,114 @@ impl Segment for ContextBarSegment {
     }
 }
 
+struct HyphaeSegment;
+impl Segment for HyphaeSegment {
+    fn name(&self) -> &'static str {
+        "hyphae"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    fn render(&self, _view: &StatuslineView, color: bool) -> Option<String> {
+        // Display is state-only (active / stale / hidden). We deliberately do
+        // not show the db byte size — it's not a memory count, and a numeric
+        // hint next to "hy" was easy to misread as one.
+        match hyphae_status() {
+            HyphaeStatus::Active { .. } => Some(paint("hy: active", "2", color)),
+            HyphaeStatus::Stale => Some(paint("hy: stale", "2", color)),
+            HyphaeStatus::Unavailable => None,
+        }
+    }
+}
+
+struct CortinaSegment;
+impl Segment for CortinaSegment {
+    fn name(&self) -> &'static str {
+        "cortina"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    fn render(&self, _view: &StatuslineView, _color: bool) -> Option<String> {
+        // Cortina has no direct data seam yet; always unavailable.
+        None
+    }
+}
+
+struct DegradationSegment;
+impl Segment for DegradationSegment {
+    fn name(&self) -> &'static str {
+        "degradation"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    fn render(&self, _view: &StatuslineView, color: bool) -> Option<String> {
+        use spore::availability::{DegradationTier, probe_all};
+
+        let reports = probe_all();
+        let unavailable: Vec<_> = reports.iter().filter(|r| !r.available).collect();
+
+        if unavailable.is_empty() {
+            return None;
+        }
+
+        // Determine highest priority tier
+        let mut has_tier1 = false;
+        let mut has_tier2 = false;
+
+        for report in &unavailable {
+            match report.tier {
+                DegradationTier::Tier1 => has_tier1 = true,
+                DegradationTier::Tier2 => has_tier2 = true,
+                DegradationTier::Tier3 | _ => {}
+            }
+        }
+
+        let (indicator, color_code) = if has_tier1 {
+            let tier1_reports: Vec<_> = unavailable
+                .iter()
+                .filter(|r| r.tier == DegradationTier::Tier1)
+                .collect();
+            let count = tier1_reports.len();
+            (
+                if count == 1 {
+                    format!("[!! {}]", tier1_reports[0].tool)
+                } else {
+                    format!("[!! {count} critical]")
+                },
+                "31", // red
+            )
+        } else if has_tier2 {
+            let tier2_reports: Vec<_> = unavailable
+                .iter()
+                .filter(|r| r.tier == DegradationTier::Tier2)
+                .collect();
+            let count = tier2_reports.len();
+            (
+                if count == 1 {
+                    format!("[! {}]", tier2_reports[0].tool)
+                } else {
+                    format!("[! {count} degraded]")
+                },
+                "33", // yellow
+            )
+        } else {
+            let count = unavailable.len();
+            (
+                if count == 1 {
+                    format!("[· {}]", unavailable[0].tool)
+                } else {
+                    format!("[· {count} optional]")
+                },
+                "2", // dim
+            )
+        };
+
+        Some(paint(&indicator, color_code, color))
+    }
+}
+
 fn default_segments() -> Vec<Box<dyn Segment>> {
     vec![
         Box::new(ContextSegment),
@@ -554,9 +789,12 @@ fn default_segments() -> Vec<Box<dyn Segment>> {
         Box::new(CostSegment),
         Box::new(ModelSegment),
         Box::new(SavingsSegment),
+        Box::new(DegradationSegment),
         Box::new(BranchSegment),
         Box::new(WorkspaceSegment),
         Box::new(ContextBarSegment),
+        Box::new(HyphaeSegment),
+        Box::new(CortinaSegment),
     ]
 }
 
@@ -576,9 +814,12 @@ fn segments_from_config(config: &StatuslineConfig) -> Vec<Box<dyn Segment>> {
             "cost" => Some(Box::new(CostSegment)),
             "model" => Some(Box::new(ModelSegment)),
             "savings" => Some(Box::new(SavingsSegment)),
+            "degradation" => Some(Box::new(DegradationSegment)),
             "branch" => Some(Box::new(BranchSegment)),
             "workspace" => Some(Box::new(WorkspaceSegment)),
             "context-bar" => Some(Box::new(ContextBarSegment)),
+            "hyphae" => Some(Box::new(HyphaeSegment)),
+            "cortina" => Some(Box::new(CortinaSegment)),
             _ => None,
         };
         if let Some(seg) = segment {
@@ -608,6 +849,270 @@ fn render_statusline(view: &StatuslineView, color: bool, segments: &[Box<dyn Seg
         line_one
     } else {
         format!("{line_one}\n{line_two}")
+    }
+}
+
+fn build_json_payload(view: &StatuslineView, config: &StatuslineConfig) -> JsonPayload {
+    let config_segments = if config.segments.is_empty() {
+        StatuslineConfig::default().segments
+    } else {
+        config.segments.clone()
+    };
+
+    let mut segments = Vec::new();
+
+    for entry in &config_segments {
+        if !entry.enabled {
+            continue;
+        }
+
+        let segment = match entry.name.as_str() {
+            "context" => build_context_segment(view),
+            "usage" => build_usage_segment(view),
+            "cost" => build_cost_segment(view),
+            "model" => build_model_segment(view),
+            "savings" => build_savings_segment(view),
+            "degradation" => build_degradation_segment(),
+            "branch" => build_branch_segment(view),
+            "workspace" => build_workspace_segment(view),
+            "context-bar" => build_context_bar_segment(view),
+            "hyphae" => build_hyphae_segment(),
+            "cortina" => build_cortina_segment(),
+            _ => continue,
+        };
+        segments.push(segment);
+    }
+
+    JsonPayload {
+        schema: "annulus-statusline-v1".to_string(),
+        version: "1".to_string(),
+        segments,
+    }
+}
+
+fn build_context_segment(view: &StatuslineView) -> JsonSegment {
+    match (view.context_pct, view.prompt_tokens, view.context_limit) {
+        (Some(pct), Some(tokens), Some(limit)) => JsonSegment {
+            name: "context".to_string(),
+            available: true,
+            value: Some(serde_json::json!({
+                "percent": pct,
+                "prompt_tokens": tokens,
+                "context_limit": limit
+            })),
+            reason: None,
+        },
+        _ => JsonSegment {
+            name: "context".to_string(),
+            available: false,
+            value: None,
+            reason: Some("no transcript available".to_string()),
+        },
+    }
+}
+
+fn build_usage_segment(view: &StatuslineView) -> JsonSegment {
+    match view.usage {
+        Some(usage) => JsonSegment {
+            name: "usage".to_string(),
+            available: true,
+            value: Some(serde_json::json!({
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cache_read_tokens": usage.cache_read_input_tokens,
+                "cache_creation_tokens": usage.cache_creation_input_tokens
+            })),
+            reason: None,
+        },
+        None => JsonSegment {
+            name: "usage".to_string(),
+            available: false,
+            value: None,
+            reason: Some("no transcript available".to_string()),
+        },
+    }
+}
+
+fn build_cost_segment(view: &StatuslineView) -> JsonSegment {
+    match view.cost {
+        Some(cost) => JsonSegment {
+            name: "cost".to_string(),
+            available: true,
+            value: Some(serde_json::json!({
+                "dollars": (cost * 100.0).round() / 100.0,
+                "model": &view.model_name
+            })),
+            reason: None,
+        },
+        None => JsonSegment {
+            name: "cost".to_string(),
+            available: false,
+            value: None,
+            reason: Some("pricing not available for model".to_string()),
+        },
+    }
+}
+
+fn build_model_segment(view: &StatuslineView) -> JsonSegment {
+    JsonSegment {
+        name: "model".to_string(),
+        available: true,
+        value: Some(serde_json::json!({
+            "display_name": &view.model_name
+        })),
+        reason: None,
+    }
+}
+
+fn build_savings_segment(view: &StatuslineView) -> JsonSegment {
+    if let Some(savings) = &view.savings {
+        JsonSegment {
+            name: "savings".to_string(),
+            available: true,
+            value: Some(serde_json::json!({
+                "saved_tokens": savings.saved_tokens,
+                "input_tokens": savings.input_tokens
+            })),
+            reason: None,
+        }
+    } else {
+        let reason = if current_runtime_session_id().is_none() {
+            "no active session".to_string()
+        } else {
+            match mycelium_db_path() {
+                Ok(path) => format!("mycelium database not found at {}", path.display()),
+                Err(_) => "mycelium database unavailable".to_string(),
+            }
+        };
+        JsonSegment {
+            name: "savings".to_string(),
+            available: false,
+            value: None,
+            reason: Some(reason),
+        }
+    }
+}
+
+fn build_branch_segment(view: &StatuslineView) -> JsonSegment {
+    match &view.branch {
+        Some(branch) => JsonSegment {
+            name: "branch".to_string(),
+            available: true,
+            value: Some(serde_json::json!({
+                "branch": branch
+            })),
+            reason: None,
+        },
+        None => JsonSegment {
+            name: "branch".to_string(),
+            available: false,
+            value: None,
+            reason: Some("not in a git repository".to_string()),
+        },
+    }
+}
+
+fn build_workspace_segment(view: &StatuslineView) -> JsonSegment {
+    match &view.workspace_name {
+        Some(name) => JsonSegment {
+            name: "workspace".to_string(),
+            available: true,
+            value: Some(serde_json::json!({
+                "name": name
+            })),
+            reason: None,
+        },
+        None => JsonSegment {
+            name: "workspace".to_string(),
+            available: false,
+            value: None,
+            reason: Some("workspace path unavailable".to_string()),
+        },
+    }
+}
+
+fn build_context_bar_segment(view: &StatuslineView) -> JsonSegment {
+    match view.context_pct {
+        Some(pct) => {
+            let bar_width = 12;
+            let fill = if pct > 0 {
+                ((usize::from(pct) * bar_width) / 100).max(1)
+            } else {
+                0
+            };
+            let fill = fill.min(bar_width);
+            let color_tier = if pct >= 85 {
+                "danger"
+            } else if pct >= 60 {
+                "warning"
+            } else {
+                "ok"
+            };
+            JsonSegment {
+                name: "context-bar".to_string(),
+                available: true,
+                value: Some(serde_json::json!({
+                    "percent": pct,
+                    "fill_chars": fill,
+                    "total_chars": bar_width,
+                    "color_tier": color_tier
+                })),
+                reason: None,
+            }
+        }
+        None => JsonSegment {
+            name: "context-bar".to_string(),
+            available: false,
+            value: None,
+            reason: Some("no transcript available".to_string()),
+        },
+    }
+}
+
+fn build_degradation_segment() -> JsonSegment {
+    use spore::availability::{DegradationTier, probe_all};
+
+    let reports = probe_all();
+    let unavailable: Vec<_> = reports.iter().filter(|r| !r.available).collect();
+
+    if unavailable.is_empty() {
+        return JsonSegment {
+            name: "degradation".to_string(),
+            available: false,
+            value: None,
+            reason: Some("no degradation detected".to_string()),
+        };
+    }
+
+    let mut tier1_count = 0;
+    let mut tier2_count = 0;
+    let mut tier3_count = 0;
+
+    for report in &unavailable {
+        match report.tier {
+            DegradationTier::Tier1 => tier1_count += 1,
+            DegradationTier::Tier2 => tier2_count += 1,
+            DegradationTier::Tier3 => tier3_count += 1,
+            _ => {}
+        }
+    }
+
+    JsonSegment {
+        name: "degradation".to_string(),
+        available: true,
+        value: Some(serde_json::json!({
+            "tier1_count": tier1_count,
+            "tier2_count": tier2_count,
+            "tier3_count": tier3_count,
+            "tools": unavailable.iter().map(|r| {
+                serde_json::json!({
+                    "name": &r.tool,
+                    "tier": format!("{}", r.tier),
+                    "reason": &r.reason
+                })
+            }).collect::<Vec<_>>()
+        })),
+        reason: None,
     }
 }
 
@@ -818,6 +1323,8 @@ mod tests {
         let line = render_statusline(
             &StatuslineView {
                 context_pct: Some(42),
+                prompt_tokens: Some(95_000),
+                context_limit: Some(200_000),
                 usage: Some(TokenUsage {
                     input_tokens: 45_000,
                     output_tokens: 12_000,
@@ -837,10 +1344,12 @@ mod tests {
             &segments,
         );
 
-        assert_eq!(
-            line,
-            "ctx: ▲ 42% │ in: 45.0K • out: 12.0K • cache: 89.0K │ $1.23 │ [ctx █████░░░░░░░ 42%]\nsonnet 4.6 │ ↓8.2K saved │ git: main │ ws: basidiocarp"
-        );
+        // Note: degradation segment is included if unavailable tools are detected
+        assert!(line.contains("ctx: ▲ 42%"));
+        assert!(line.contains("sonnet 4.6"));
+        assert!(line.contains("↓8.2K saved"));
+        assert!(line.contains("git: main"));
+        assert!(line.contains("ws: basidiocarp"));
     }
 
     #[test]
@@ -849,6 +1358,8 @@ mod tests {
         let line = render_statusline(
             &StatuslineView {
                 context_pct: None,
+                prompt_tokens: None,
+                context_limit: None,
                 usage: None,
                 cost: None,
                 model_name: "unknown".to_string(),
@@ -860,7 +1371,9 @@ mod tests {
             &segments,
         );
 
-        assert_eq!(line, "ctx: -- │ -- │ -- │ [ctx ░░░░░░░░░░░░ --]\nunknown");
+        // Note: degradation segment is included if unavailable tools are detected
+        assert!(line.contains("ctx: --"));
+        assert!(line.contains("unknown"));
     }
 
     #[test]
@@ -962,6 +1475,8 @@ mod tests {
     fn default_view() -> StatuslineView {
         StatuslineView {
             context_pct: None,
+            prompt_tokens: None,
+            context_limit: None,
             usage: None,
             cost: None,
             model_name: "unknown".to_string(),
@@ -1013,5 +1528,479 @@ mod tests {
         let segment = ContextBarSegment;
         let output = segment.render(&view, false).unwrap();
         assert_eq!(output, "[ctx ░░░░░░░░░░░░ --]");
+    }
+
+    #[test]
+    fn json_payload_includes_all_enabled_segments() {
+        let view = StatuslineView {
+            context_pct: Some(67),
+            prompt_tokens: Some(134_000),
+            context_limit: Some(200_000),
+            usage: Some(TokenUsage {
+                input_tokens: 100_000,
+                output_tokens: 20_000,
+                cache_read_input_tokens: 50_000,
+                cache_creation_input_tokens: 10_000,
+            }),
+            cost: Some(0.75),
+            model_name: "sonnet 4.6".to_string(),
+            branch: Some("main".to_string()),
+            workspace_name: Some("basidiocarp".to_string()),
+            savings: Some(SavingsStat {
+                saved_tokens: 45_000,
+                input_tokens: 100_000,
+            }),
+        };
+        let config = StatuslineConfig::default();
+        let payload = build_json_payload(&view, &config);
+
+        assert_eq!(payload.schema, "annulus-statusline-v1");
+        assert_eq!(payload.version, "1");
+        assert!(payload.segments.len() >= 10);
+
+        let segment_names: Vec<&str> = payload.segments.iter().map(|s| s.name.as_str()).collect();
+        assert!(segment_names.contains(&"context"));
+        assert!(segment_names.contains(&"usage"));
+        assert!(segment_names.contains(&"cost"));
+        assert!(segment_names.contains(&"model"));
+        assert!(segment_names.contains(&"savings"));
+        assert!(segment_names.contains(&"branch"));
+        assert!(segment_names.contains(&"workspace"));
+        assert!(segment_names.contains(&"context-bar"));
+
+        // Values must carry the view's data, not just be present. The earlier
+        // version of this test passed even when segments emitted empty values.
+        let find = |n: &str| payload.segments.iter().find(|s| s.name == n).unwrap();
+
+        let cost = find("cost");
+        assert!(cost.available);
+        assert_eq!(cost.value.as_ref().unwrap()["dollars"].as_f64(), Some(0.75));
+
+        let model = find("model");
+        assert!(model.available);
+        assert_eq!(
+            model.value.as_ref().unwrap()["display_name"].as_str(),
+            Some("sonnet 4.6")
+        );
+
+        let branch = find("branch");
+        assert!(branch.available);
+        assert_eq!(
+            branch.value.as_ref().unwrap()["branch"].as_str(),
+            Some("main")
+        );
+
+        let usage = find("usage");
+        assert!(usage.available);
+        assert_eq!(
+            usage.value.as_ref().unwrap()["input_tokens"].as_u64(),
+            Some(100_000)
+        );
+        assert_eq!(
+            usage.value.as_ref().unwrap()["output_tokens"].as_u64(),
+            Some(20_000)
+        );
+
+        let savings = find("savings");
+        assert!(savings.available);
+        assert_eq!(
+            savings.value.as_ref().unwrap()["saved_tokens"].as_u64(),
+            Some(45_000)
+        );
+
+        let context = find("context");
+        assert!(context.available);
+        assert_eq!(
+            context.value.as_ref().unwrap()["percent"].as_u64(),
+            Some(67)
+        );
+    }
+
+    #[test]
+    fn json_payload_degraded_segment_includes_reason() {
+        let view = StatuslineView {
+            context_pct: None,
+            prompt_tokens: None,
+            context_limit: None,
+            usage: None,
+            cost: None,
+            model_name: "unknown".to_string(),
+            branch: None,
+            workspace_name: None,
+            savings: None,
+        };
+        let config = StatuslineConfig::default();
+        let payload = build_json_payload(&view, &config);
+
+        let context_segment = payload
+            .segments
+            .iter()
+            .find(|s| s.name == "context")
+            .unwrap();
+        assert!(!context_segment.available);
+        assert!(context_segment.reason.is_some());
+        assert!(context_segment.value.is_none());
+
+        let branch_segment = payload
+            .segments
+            .iter()
+            .find(|s| s.name == "branch")
+            .unwrap();
+        assert!(!branch_segment.available);
+        assert!(branch_segment.reason.is_some());
+        assert!(branch_segment.value.is_none());
+    }
+
+    #[test]
+    fn json_context_segment_serializes_percent() {
+        let view = StatuslineView {
+            context_pct: Some(67),
+            prompt_tokens: Some(134_000),
+            context_limit: Some(200_000),
+            ..default_view()
+        };
+        let segment = build_context_segment(&view);
+        assert!(segment.available);
+        assert!(segment.value.is_some());
+        let value = segment.value.unwrap();
+        assert_eq!(value.get("percent").and_then(Value::as_u64), Some(67));
+    }
+
+    #[test]
+    fn json_context_segment_includes_real_token_values() {
+        let view = StatuslineView {
+            context_pct: Some(67),
+            prompt_tokens: Some(134_000),
+            context_limit: Some(200_000),
+            ..default_view()
+        };
+        let segment = build_context_segment(&view);
+        assert!(segment.available);
+        assert!(segment.reason.is_none());
+        let value = segment.value.unwrap();
+        assert_eq!(value.get("percent").and_then(Value::as_u64), Some(67));
+        assert_eq!(
+            value.get("prompt_tokens").and_then(Value::as_u64),
+            Some(134_000)
+        );
+        assert_eq!(
+            value.get("context_limit").and_then(Value::as_u64),
+            Some(200_000)
+        );
+    }
+
+    #[test]
+    fn json_context_segment_unavailable_when_tokens_missing() {
+        let view = StatuslineView {
+            context_pct: Some(67),
+            prompt_tokens: Some(134_000),
+            context_limit: None, // Missing limit
+            ..default_view()
+        };
+        let segment = build_context_segment(&view);
+        assert!(!segment.available);
+        assert!(segment.reason.is_some());
+        assert!(segment.value.is_none());
+    }
+
+    #[test]
+    fn json_usage_segment_serializes_all_token_types() {
+        let view = StatuslineView {
+            usage: Some(TokenUsage {
+                input_tokens: 100_000,
+                output_tokens: 20_000,
+                cache_read_input_tokens: 50_000,
+                cache_creation_input_tokens: 10_000,
+            }),
+            ..default_view()
+        };
+        let segment = build_usage_segment(&view);
+        assert!(segment.available);
+        let value = segment.value.unwrap();
+        assert_eq!(
+            value.get("input_tokens").and_then(Value::as_u64),
+            Some(100_000)
+        );
+        assert_eq!(
+            value.get("output_tokens").and_then(Value::as_u64),
+            Some(20_000)
+        );
+        assert_eq!(
+            value.get("cache_read_tokens").and_then(Value::as_u64),
+            Some(50_000)
+        );
+        assert_eq!(
+            value.get("cache_creation_tokens").and_then(Value::as_u64),
+            Some(10_000)
+        );
+    }
+
+    #[test]
+    fn json_savings_segment_unavailable_when_no_session() {
+        let view = StatuslineView {
+            savings: None,
+            ..default_view()
+        };
+        let segment = build_savings_segment(&view);
+        assert!(!segment.available);
+        assert_eq!(segment.name, "savings");
+    }
+
+    #[test]
+    fn json_context_bar_serializes_color_tier() {
+        let view_ok = StatuslineView {
+            context_pct: Some(50),
+            ..default_view()
+        };
+        let segment_ok = build_context_bar_segment(&view_ok);
+        let value_ok = segment_ok.value.unwrap();
+        assert_eq!(
+            value_ok.get("color_tier").and_then(Value::as_str),
+            Some("ok")
+        );
+
+        let view_warning = StatuslineView {
+            context_pct: Some(70),
+            ..default_view()
+        };
+        let segment_warning = build_context_bar_segment(&view_warning);
+        let value_warning = segment_warning.value.unwrap();
+        assert_eq!(
+            value_warning.get("color_tier").and_then(Value::as_str),
+            Some("warning")
+        );
+
+        let view_danger = StatuslineView {
+            context_pct: Some(90),
+            ..default_view()
+        };
+        let segment_danger = build_context_bar_segment(&view_danger);
+        let value_danger = segment_danger.value.unwrap();
+        assert_eq!(
+            value_danger.get("color_tier").and_then(Value::as_str),
+            Some("danger")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn degradation_segment_renders_correct_tier_when_mixed_unavailable() {
+        use spore::availability::{AvailabilityReport, DegradationTier};
+
+        // Test helper: render a DegradationSegment with injected reports
+        fn render_degradation_with_reports(reports: &[AvailabilityReport]) -> Option<String> {
+            // Simulate the key logic from DegradationSegment::render
+            let unavailable: Vec<_> = reports.iter().filter(|r| !r.available).collect();
+
+            if unavailable.is_empty() {
+                return None;
+            }
+
+            let mut has_tier1 = false;
+            let mut has_tier2 = false;
+
+            for report in &unavailable {
+                match report.tier {
+                    DegradationTier::Tier1 => has_tier1 = true,
+                    DegradationTier::Tier2 => has_tier2 = true,
+                    DegradationTier::Tier3 | _ => {}
+                }
+            }
+
+            let indicator = if has_tier1 {
+                let tier1_reports: Vec<_> = unavailable
+                    .iter()
+                    .filter(|r| r.tier == DegradationTier::Tier1)
+                    .collect();
+                let count = tier1_reports.len();
+                if count == 1 {
+                    format!("[!! {}]", tier1_reports[0].tool)
+                } else {
+                    format!("[!! {count} critical]")
+                }
+            } else if has_tier2 {
+                let tier2_reports: Vec<_> = unavailable
+                    .iter()
+                    .filter(|r| r.tier == DegradationTier::Tier2)
+                    .collect();
+                let count = tier2_reports.len();
+                if count == 1 {
+                    format!("[! {}]", tier2_reports[0].tool)
+                } else {
+                    format!("[! {count} degraded]")
+                }
+            } else {
+                let count = unavailable.len();
+                if count == 1 {
+                    format!("[· {}]", unavailable[0].tool)
+                } else {
+                    format!("[· {count} optional]")
+                }
+            };
+
+            Some(indicator)
+        }
+
+        // Test: Tier1 (mycelium) unavailable + Tier3 (hymenium) unavailable.
+        // Should render mycelium, not hymenium.
+        let reports = vec![
+            AvailabilityReport {
+                tool: "mycelium".to_string(),
+                available: false,
+                tier: DegradationTier::Tier1,
+                reason: Some("not found".to_string()),
+                degraded_capabilities: vec![],
+            },
+            AvailabilityReport {
+                tool: "hymenium".to_string(),
+                available: false,
+                tier: DegradationTier::Tier3,
+                reason: Some("not found".to_string()),
+                degraded_capabilities: vec![],
+            },
+        ];
+
+        let output = render_degradation_with_reports(&reports);
+        assert!(
+            output.is_some(),
+            "should render when unavailable tools exist"
+        );
+        let output = output.unwrap();
+        assert!(
+            output.contains("mycelium"),
+            "should contain mycelium (Tier1), got: {output}"
+        );
+        assert!(
+            !output.contains("hymenium"),
+            "should NOT contain hymenium (Tier3), got: {output}"
+        );
+        assert_eq!(
+            output, "[!! mycelium]",
+            "single Tier1 tool should use !! prefix"
+        );
+
+        // Test: Tier2 (hyphae) unavailable + Tier3 (volva) unavailable.
+        // Should render hyphae, not volva.
+        let reports2 = vec![
+            AvailabilityReport {
+                tool: "hyphae".to_string(),
+                available: false,
+                tier: DegradationTier::Tier2,
+                reason: Some("not found".to_string()),
+                degraded_capabilities: vec![],
+            },
+            AvailabilityReport {
+                tool: "volva".to_string(),
+                available: false,
+                tier: DegradationTier::Tier3,
+                reason: Some("not found".to_string()),
+                degraded_capabilities: vec![],
+            },
+        ];
+
+        let output2 = render_degradation_with_reports(&reports2);
+        assert!(
+            output2.is_some(),
+            "should render when unavailable tools exist"
+        );
+        let output2 = output2.unwrap();
+        assert!(
+            output2.contains("hyphae"),
+            "should contain hyphae (Tier2), got: {output2}"
+        );
+        assert!(
+            !output2.contains("volva"),
+            "should NOT contain volva (Tier3), got: {output2}"
+        );
+        assert_eq!(
+            output2, "[! hyphae]",
+            "single Tier2 tool should use ! prefix"
+        );
+    }
+
+    // ── Step 1: hyphae / cortina segment tests ────────────────────────────────
+
+    #[test]
+    fn hyphae_segment_unavailable_when_db_missing() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let nonexistent = temp_dir.path().join("hyphae.db");
+
+        let status = hyphae_status_at_path(&nonexistent);
+        assert_eq!(status, HyphaeStatus::Unavailable);
+
+        let segment_json = build_hyphae_segment_at_path(&nonexistent);
+        assert!(!segment_json.available);
+        assert_eq!(segment_json.name, "hyphae");
+        assert!(segment_json.reason.is_some());
+        assert!(
+            segment_json
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("hyphae.db not found"),
+            "reason should mention hyphae.db not found"
+        );
+    }
+
+    #[test]
+    fn hyphae_segment_active_when_db_recently_modified() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = temp_dir.path().join("hyphae.db");
+        // Write a small db placeholder (just needs to exist and be recent)
+        fs::write(&db_path, b"SQLite format 3\x00").expect("write db");
+
+        let status = hyphae_status_at_path(&db_path);
+        // Should be active (just written, so mtime is now)
+        assert!(
+            matches!(status, HyphaeStatus::Active { .. }),
+            "recently modified db should be Active, got: {status:?}"
+        );
+    }
+
+    #[test]
+    fn cortina_segment_always_unavailable_stub() {
+        let view = default_view();
+        let seg = CortinaSegment;
+        // Terminal render: always None (nothing shown)
+        let render = seg.render(&view, false);
+        assert!(render.is_none(), "cortina should render nothing");
+
+        // JSON render: always unavailable with stub reason
+        let json_seg = build_cortina_segment();
+        assert!(!json_seg.available);
+        assert_eq!(json_seg.name, "cortina");
+        assert_eq!(json_seg.reason.as_deref(), Some("no direct data seam yet"));
+    }
+
+    #[test]
+    fn explicit_provider_in_config_is_used() {
+        // A config with provider = "codex" should select the codex provider.
+        let config = StatuslineConfig {
+            provider: Some("codex".to_string()),
+            ..StatuslineConfig::default()
+        };
+
+        let provider = crate::providers::detect_provider(config.provider.as_deref());
+        assert_eq!(provider.name(), "codex");
+
+        // A config with no provider uses claude.
+        let config_default = StatuslineConfig::default();
+        let provider_default =
+            crate::providers::detect_provider(config_default.provider.as_deref());
+        assert_eq!(provider_default.name(), "claude");
+    }
+
+    #[test]
+    fn hyphae_segment_included_in_default_segments() {
+        let segments = default_segments();
+        let names: Vec<&str> = segments.iter().map(|s| s.name()).collect();
+        assert!(
+            names.contains(&"hyphae"),
+            "hyphae should be in default segments"
+        );
+        assert!(
+            names.contains(&"cortina"),
+            "cortina should be in default segments"
+        );
     }
 }

@@ -1,4 +1,6 @@
 mod config;
+mod providers;
+mod status;
 mod statusline;
 mod validate_hooks;
 
@@ -20,6 +22,15 @@ enum Command {
         /// Disable color output
         #[arg(long)]
         no_color: bool,
+        /// Output JSON instead of terminal statusline
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show ecosystem availability status
+    Status {
+        /// Output JSON instead of human-readable table
+        #[arg(long)]
+        json: bool,
     },
     /// Validate hooks configuration
     ValidateHooks,
@@ -29,7 +40,15 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Command::Statusline { no_color } => statusline::handle_stdin(no_color),
+        Command::Statusline { no_color, json } => statusline::handle_stdin(json, no_color),
+        Command::Status { json } => {
+            if json {
+                println!("{}", status::status_json());
+            } else {
+                print!("{}", status::status_table());
+            }
+            Ok(())
+        }
         Command::ValidateHooks => validate_hooks::run(),
     };
 

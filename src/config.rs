@@ -12,9 +12,12 @@ const DEFAULT_SEGMENTS: &[&str] = &[
     "cost",
     "model",
     "savings",
+    "degradation",
     "branch",
     "workspace",
     "context-bar",
+    "hyphae",
+    "cortina",
 ];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -35,12 +38,18 @@ struct RawConfig {
     segments: Vec<SegmentEntry>,
     #[serde(default, rename = "context-limits")]
     context_limits: HashMap<String, usize>,
+    /// Explicit provider override ("claude", "codex", "gemini").
+    /// When absent, provider auto-detection is used (currently always claude).
+    #[serde(default)]
+    provider: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StatuslineConfig {
     pub segments: Vec<SegmentEntry>,
     pub context_limits: HashMap<String, usize>,
+    /// Explicit provider name. `None` means auto-detect (currently claude).
+    pub provider: Option<String>,
 }
 
 impl Default for StatuslineConfig {
@@ -54,6 +63,7 @@ impl Default for StatuslineConfig {
                 })
                 .collect(),
             context_limits: HashMap::new(),
+            provider: None,
         }
     }
 }
@@ -91,6 +101,7 @@ pub fn load_config() -> StatuslineConfig {
             StatuslineConfig {
                 segments,
                 context_limits: raw.context_limits,
+                provider: raw.provider,
             }
         }
         Err(e) => {
@@ -114,7 +125,7 @@ mod tests {
     #[test]
     fn test_default_config_has_all_segments() {
         let config = StatuslineConfig::default();
-        assert_eq!(config.segments.len(), 8);
+        assert_eq!(config.segments.len(), 11);
         assert!(config.segments.iter().all(|s| s.enabled));
         let names: Vec<_> = config.segments.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
@@ -125,9 +136,12 @@ mod tests {
                 "cost",
                 "model",
                 "savings",
+                "degradation",
                 "branch",
                 "workspace",
-                "context-bar"
+                "context-bar",
+                "hyphae",
+                "cortina",
             ]
         );
     }
@@ -135,7 +149,7 @@ mod tests {
     #[test]
     fn test_load_config_missing_file_returns_defaults() {
         let config = load_config();
-        assert_eq!(config.segments.len(), 8);
+        assert_eq!(config.segments.len(), 11);
         assert!(config.segments.iter().all(|s| s.enabled));
     }
 
@@ -170,7 +184,7 @@ sonnet = 250000
         let result = toml::from_str::<RawConfig>(malformed);
         assert!(result.is_err());
         let config = load_config();
-        assert_eq!(config.segments.len(), 8);
+        assert_eq!(config.segments.len(), 11);
     }
 
     #[test]
