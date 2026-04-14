@@ -4,6 +4,13 @@ All notable changes to Annulus are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-04-14
+
+### Fixed
+
+- **Windows hook lookup**: `validate-hooks` now resolves PATH entries with `split_paths` and honors `PATHEXT`, so known binaries are found correctly on Windows runners.
+- **CI validation**: corrected the formatting and validation surface for the new hook lookup path so the release branch passes the shared CI gate.
+
 ## [0.4.0] - 2026-04-14
 
 ### Added
