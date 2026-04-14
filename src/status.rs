@@ -1,7 +1,7 @@
 use std::fmt::Write;
 
 use serde::{Deserialize, Serialize};
-use spore::availability::{AvailabilityReport, DegradationTier, probe_all};
+use spore::availability::{AvailabilityReport, probe_all};
 
 /// JSON response for the `annulus status --json` subcommand.
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,58 +89,57 @@ pub fn status_table() -> String {
     output
 }
 
-/// Determine the highest-priority degradation tier present in reports.
-/// Returns None if all tools are available or reports is empty.
-#[allow(dead_code)]
-pub fn highest_degraded_tier(reports: &[AvailabilityReport]) -> Option<DegradationTier> {
-    let unavailable = reports.iter().filter(|r| !r.available);
-
-    let mut has_tier1 = false;
-    let mut has_tier2 = false;
-    let mut has_tier3 = false;
-
-    for report in unavailable {
-        match report.tier {
-            DegradationTier::Tier1 => has_tier1 = true,
-            DegradationTier::Tier2 => has_tier2 = true,
-            DegradationTier::Tier3 => has_tier3 = true,
-            _ => {}
-        }
-    }
-
-    if has_tier1 {
-        Some(DegradationTier::Tier1)
-    } else if has_tier2 {
-        Some(DegradationTier::Tier2)
-    } else if has_tier3 {
-        Some(DegradationTier::Tier3)
-    } else {
-        None
-    }
-}
-
-/// Count unavailable tools at each tier.
-#[allow(dead_code)]
-pub fn count_unavailable_by_tier(reports: &[AvailabilityReport]) -> (usize, usize, usize) {
-    let mut tier1 = 0;
-    let mut tier2 = 0;
-    let mut tier3 = 0;
-
-    for report in reports.iter().filter(|r| !r.available) {
-        match report.tier {
-            DegradationTier::Tier1 => tier1 += 1,
-            DegradationTier::Tier2 => tier2 += 1,
-            DegradationTier::Tier3 => tier3 += 1,
-            _ => {}
-        }
-    }
-
-    (tier1, tier2, tier3)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spore::availability::DegradationTier;
+
+    /// Determine the highest-priority degradation tier present in reports.
+    /// Returns None if all tools are available or reports is empty.
+    fn highest_degraded_tier(reports: &[AvailabilityReport]) -> Option<DegradationTier> {
+        let unavailable = reports.iter().filter(|r| !r.available);
+
+        let mut has_tier1 = false;
+        let mut has_tier2 = false;
+        let mut has_tier3 = false;
+
+        for report in unavailable {
+            match report.tier {
+                DegradationTier::Tier1 => has_tier1 = true,
+                DegradationTier::Tier2 => has_tier2 = true,
+                DegradationTier::Tier3 => has_tier3 = true,
+                _ => {}
+            }
+        }
+
+        if has_tier1 {
+            Some(DegradationTier::Tier1)
+        } else if has_tier2 {
+            Some(DegradationTier::Tier2)
+        } else if has_tier3 {
+            Some(DegradationTier::Tier3)
+        } else {
+            None
+        }
+    }
+
+    /// Count unavailable tools at each tier.
+    fn count_unavailable_by_tier(reports: &[AvailabilityReport]) -> (usize, usize, usize) {
+        let mut tier1 = 0;
+        let mut tier2 = 0;
+        let mut tier3 = 0;
+
+        for report in reports.iter().filter(|r| !r.available) {
+            match report.tier {
+                DegradationTier::Tier1 => tier1 += 1,
+                DegradationTier::Tier2 => tier2 += 1,
+                DegradationTier::Tier3 => tier3 += 1,
+                _ => {}
+            }
+        }
+
+        (tier1, tier2, tier3)
+    }
 
     #[test]
     fn test_status_json_structure() {

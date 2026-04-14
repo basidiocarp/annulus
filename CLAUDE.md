@@ -58,13 +58,25 @@ cargo fmt
 ```text
 src/
 ├── main.rs            # CLI entry point and subcommand dispatch
+├── lib.rs             # Crate root for integration tests
 ├── statusline.rs      # Segment rendering and composition
-└── validate_hooks.rs  # Hook path validation
+├── status.rs          # Ecosystem status (probe-based)
+├── config.rs          # Statusline configuration (TOML)
+├── validate_hooks.rs  # Hook path validation
+└── providers/
+    ├── mod.rs         # TokenProvider trait and auto-detection
+    ├── claude.rs      # Claude NDJSON transcript reader
+    ├── codex.rs       # Codex NDJSON session reader
+    └── gemini.rs      # Gemini JSON session reader
 ```
 
 - **main.rs**: Clap CLI with `statusline` and `validate-hooks` subcommands.
+- **lib.rs**: Crate root that exposes modules for integration tests.
 - **statusline.rs**: Reads from ecosystem tools (git, mycelium, hyphae, canopy, volva) via CLI probes or direct file access. Each data source is an independent segment.
+- **status.rs**: Probe-based ecosystem status checks used by the statusline.
+- **config.rs**: Loads and validates `~/.config/annulus/statusline.toml`; provides defaults when the file is absent.
 - **validate_hooks.rs**: Reads host config files and checks that registered hook paths exist and are executable.
+- **providers/**: Token usage readers for each supported AI provider. `mod.rs` defines the `TokenProvider` trait and auto-detects which provider to use.
 
 ---
 
@@ -83,7 +95,10 @@ src/
 |------|---------|
 | `src/main.rs` | CLI entry point and subcommand routing |
 | `src/statusline.rs` | Statusline segment rendering |
+| `src/status.rs` | Probe-based ecosystem status checks |
+| `src/config.rs` | Statusline configuration loading (TOML) |
 | `src/validate_hooks.rs` | Hook path validation logic |
+| `src/providers/mod.rs` | TokenProvider trait and provider auto-detection |
 
 ---
 
@@ -106,7 +121,7 @@ Annulus does not emit structured payloads to sibling tools in the current scaffo
 
 ### Shared Dependencies
 
-- **spore** (future): tool discovery and shared path resolution. Not yet a dependency — added when segment implementations land.
+- **spore**: tool discovery and shared path resolution. Active dependency pinned in `Cargo.toml`.
 
 ---
 

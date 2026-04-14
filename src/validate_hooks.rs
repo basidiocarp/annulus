@@ -118,6 +118,64 @@ fn extract_paths_from_command(command: &str) -> Vec<PathBuf> {
     paths
 }
 
+/// Extracts the bare command name (first token) from a command string.
+///
+/// Returns `None` when the first token looks like a shell built-in, an
+/// absolute path, or a variable expansion rather than a plain binary name.
+fn extract_bare_command(command: &str) -> Option<&str> {
+    let first = command.split_whitespace().next()?;
+    let first = first.trim_matches(|ch| matches!(ch, '"' | '\''));
+
+    // Skip absolute paths — those are handled by extract_paths_from_command.
+    if first.starts_with('/') || first.starts_with("~/") || first.starts_with("$HOME/") {
+        return None;
+    }
+
+    // Skip variable expansions and shell metacharacters.
+    if first.starts_with('$') || first.contains('=') || first.contains('/') {
+        return None;
+    }
+
+    // Skip common shell built-ins that are not real disk executables.
+    let builtins = [
+        "if", "then", "else", "fi", "for", "while", "do", "done", "case", "esac",
+    ];
+    if builtins.contains(&first) {
+        return None;
+    }
+
+    Some(first)
+}
+
+/// Searches PATH for `cmd` and returns the full path if found and executable.
+fn find_command_on_path(cmd: &str) -> Option<PathBuf> {
+    let path_var = std::env::var("PATH").ok()?;
+
+    for dir in path_var.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let candidate = PathBuf::from(dir).join(cmd);
+        if candidate.exists() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = std::fs::metadata(&candidate) {
+                    if (meta.permissions().mode() & 0o111) != 0 {
+                        return Some(candidate);
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
 /// Validates whether a hook path is executable
 fn validate_hook_path(path: &Path) -> ValidationStatus {
     if !path.exists() {
@@ -185,8 +243,22 @@ pub fn run() -> Result<()> {
             let paths = extract_paths_from_command(&command);
 
             if paths.is_empty() {
-                // No absolute paths to validate in this command
-                println!("  [OK]    {event} → {command}");
+                // No file-extension path found; check if the command is a bare binary on PATH.
+                if let Some(cmd) = extract_bare_command(&command) {
+                    if let Some(found_at) = find_command_on_path(cmd) {
+                        println!(
+                            "  [OK]    {event} → {command} ({cmd} at {})",
+                            found_at.display()
+                        );
+                    } else {
+                        println!("  [WARN]  {event} → {command} ({cmd} not found on PATH)");
+                        stale_count += 1;
+                        any_failed = true;
+                    }
+                } else {
+                    // Cannot determine binary; skip silently.
+                    println!("  [OK]    {event} → {command}");
+                }
                 continue;
             }
 
@@ -407,5 +479,106 @@ mod tests {
         assert_eq!(status, ValidationStatus::Ok);
 
         fs::remove_file(path).unwrap();
+    }
+
+    // --- extract_bare_command tests ---
+
+    #[test]
+    fn test_extract_bare_command_simple_binary() {
+        assert_eq!(extract_bare_command("cortina capture"), Some("cortina"));
+    }
+
+    #[test]
+    fn test_extract_bare_command_with_args() {
+        assert_eq!(
+            extract_bare_command("annulus statusline --format json"),
+            Some("annulus")
+        );
+    }
+
+    #[test]
+    fn test_extract_bare_command_skips_absolute_path() {
+        assert_eq!(extract_bare_command("/usr/local/bin/cortina capture"), None);
+    }
+
+    #[test]
+    fn test_extract_bare_command_skips_tilde_path() {
+        assert_eq!(extract_bare_command("~/bin/cortina capture"), None);
+    }
+
+    #[test]
+    fn test_extract_bare_command_skips_dollar_home_path() {
+        assert_eq!(
+            extract_bare_command("$HOME/.local/bin/cortina capture"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_bare_command_skips_variable_expansion() {
+        assert_eq!(extract_bare_command("$MY_HOOK capture"), None);
+    }
+
+    #[test]
+    fn test_extract_bare_command_empty_string() {
+        assert_eq!(extract_bare_command(""), None);
+    }
+
+    // --- find_command_on_path tests ---
+
+    #[test]
+    fn test_find_command_on_path_finds_known_binary() {
+        // `sh` is universally present on any system that can run tests
+        let result = find_command_on_path("sh");
+        assert!(result.is_some(), "expected to find `sh` on PATH");
+        assert!(result.unwrap().is_absolute());
+    }
+
+    #[test]
+    fn test_find_command_on_path_missing_binary() {
+        let result = find_command_on_path("__annulus_nonexistent_binary__");
+        assert!(result.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(unsafe_code)] // set_var is unsafe in Rust 2024; safe here because tests are single-threaded
+    fn test_find_command_on_path_respects_execute_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Place a non-executable file on a temp dir and prepend it to PATH.
+        let dir = std::env::temp_dir().join(format!(
+            "annulus-pathtest-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        let bin = dir.join("__annulus_noexec__");
+        fs::write(&bin, "#!/bin/sh\necho hi").unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        // SAFETY: this test is single-threaded; mutating PATH is safe here.
+        unsafe {
+            std::env::set_var("PATH", format!("{}:{original_path}", dir.display()));
+        }
+
+        let result = find_command_on_path("__annulus_noexec__");
+
+        // Restore PATH before asserting so cleanup still runs on failure.
+        // SAFETY: same single-threaded context as above.
+        unsafe {
+            std::env::set_var("PATH", &original_path);
+        }
+        fs::remove_file(&bin).unwrap();
+        fs::remove_dir(&dir).unwrap();
+
+        assert!(
+            result.is_none(),
+            "non-executable binary should not be found"
+        );
     }
 }

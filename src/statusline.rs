@@ -160,15 +160,12 @@ fn render_and_print_json(view: &StatuslineView, config: &StatuslineConfig) -> Re
 
 fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> StatuslineView {
     // Route through the provider abstraction. `detect_provider` selects the
-    // active provider from the config's `provider` field (or auto-detects,
-    // which currently always returns ClaudeProvider). Codex and Gemini
-    // providers return `Ok(None)` in this pass, so Claude is the effective
-    // source of transcript data in all current configurations.
-    //
-    // The provider is wired here so that the registry exists and callers can
-    // query `provider.name()` and `provider.is_available()`. The full session
-    // data pipeline will migrate off `read_transcript_usage` in a future pass
-    // once non-Claude providers expose richer breakdowns.
+    // active provider from the config's `provider` field (or auto-detects by
+    // comparing the most recent session timestamp across Claude, Codex, and
+    // Gemini). Claude uses the rich transcript path (`read_transcript_usage`)
+    // which provides per-turn context data. Non-Claude providers use
+    // `session_usage()` for cumulative token counts; context-bar / per-turn
+    // data is not available for those providers in the current pass.
     let provider: Box<dyn providers::TokenProvider> = {
         let explicit = config.provider.as_deref();
         match providers::detect_provider(explicit) {
@@ -180,7 +177,7 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
     };
 
     // For Claude, read the full transcript breakdown via the streaming path.
-    // For other providers (stubs in this pass), skip transcript reading.
+    // For other providers, call session_usage() for cumulative token counts.
     let transcript_usage = if provider.name() == "claude" {
         input
             .transcript_path
@@ -189,16 +186,33 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
     } else {
         None
     };
-    let usage = transcript_usage
-        .map(|usage| usage.cumulative)
-        .filter(|usage| usage.has_data());
+    let usage = if provider.name() == "claude" {
+        transcript_usage
+            .map(|usage| usage.cumulative)
+            .filter(|usage| usage.has_data())
+    } else {
+        provider
+            .session_usage()
+            .ok()
+            .flatten()
+            .map(|u| TokenUsage {
+                input_tokens: u.prompt_tokens as usize,
+                output_tokens: u.completion_tokens as usize,
+                cache_read_input_tokens: u.cache_read_tokens as usize,
+                cache_creation_input_tokens: u.cache_creation_tokens as usize,
+            })
+            .filter(|u| u.has_data())
+    };
     let model_name = input
         .model
         .and_then(|model| model.display_name)
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| provider.name().to_string());
     let pricing = pricing_for_model(&model_name);
     let context_limit = config.context_limit_for_model(&model_name);
+    // latest_assistant is only available from the Claude transcript path.
+    // Non-Claude providers don't expose per-turn breakdowns, so context-bar
+    // data is not rendered for them.
     let latest_assistant = transcript_usage.and_then(|usage| usage.latest_assistant);
     let context_pct = latest_assistant
         .filter(|usage| usage.has_data())
@@ -279,6 +293,7 @@ fn context_pct_for_usage(usage: TokenUsage, context_limit: usize) -> u8 {
     pct.clamp(0.0, 255.0) as u8
 }
 
+#[allow(clippy::if_same_then_else)] // o3-mini and o4-mini share identical pricing today; keep them explicit for future divergence
 fn pricing_for_model(display_name: &str) -> Option<Pricing> {
     let normalized = display_name.to_ascii_lowercase();
     if normalized.contains("opus") {
@@ -307,6 +322,45 @@ fn pricing_for_model(display_name: &str) -> Option<Pricing> {
             cache_creation_per_million: 1.0,
             cache_read_above_threshold: 0.13,
             cache_creation_above_threshold: 1.30,
+        })
+    } else if normalized.contains("o3-mini") || normalized.contains("o4-mini") {
+        // o3-mini and o4-mini share identical public pricing as of 2025-04.
+        Some(Pricing {
+            input_per_million: 1.10,
+            output_per_million: 4.40,
+            cache_read_per_million: 0.0,
+            cache_creation_per_million: 0.0,
+            cache_read_above_threshold: 0.0,
+            cache_creation_above_threshold: 0.0,
+        })
+    } else if normalized.contains("gpt-4.1") {
+        Some(Pricing {
+            input_per_million: 2.00,
+            output_per_million: 8.00,
+            cache_read_per_million: 0.0,
+            cache_creation_per_million: 0.0,
+            cache_read_above_threshold: 0.0,
+            cache_creation_above_threshold: 0.0,
+        })
+    } else if normalized.contains("gemini-2.5-flash") {
+        // Gemini 2.5 Flash has tiered output pricing (thinking vs non-thinking);
+        // we use the non-thinking output rate here as the conservative estimate.
+        Some(Pricing {
+            input_per_million: 0.15,
+            output_per_million: 0.60,
+            cache_read_per_million: 0.0,
+            cache_creation_per_million: 0.0,
+            cache_read_above_threshold: 0.0,
+            cache_creation_above_threshold: 0.0,
+        })
+    } else if normalized.contains("gemini-2.5-pro") {
+        Some(Pricing {
+            input_per_million: 1.25,
+            output_per_million: 10.00,
+            cache_read_per_million: 0.0,
+            cache_creation_per_million: 0.0,
+            cache_read_above_threshold: 0.0,
+            cache_creation_above_threshold: 0.0,
         })
     } else {
         None
@@ -794,7 +848,6 @@ fn default_segments() -> Vec<Box<dyn Segment>> {
         Box::new(WorkspaceSegment),
         Box::new(ContextBarSegment),
         Box::new(HyphaeSegment),
-        Box::new(CortinaSegment),
     ]
 }
 
@@ -2009,9 +2062,10 @@ mod tests {
             names.contains(&"hyphae"),
             "hyphae should be in default segments"
         );
+        // cortina is intentionally excluded from defaults until a data seam exists.
         assert!(
-            names.contains(&"cortina"),
-            "cortina should be in default segments"
+            !names.contains(&"cortina"),
+            "cortina should not be in default segments"
         );
     }
 }
