@@ -1267,7 +1267,12 @@ mod tests {
         )
         .unwrap();
 
-        let config = StatuslineConfig::default();
+        // Explicitly select Claude so this test is not affected by auto-detection
+        // choosing a different provider based on the local environment.
+        let config = StatuslineConfig {
+            provider: Some("claude".to_string()),
+            ..StatuslineConfig::default()
+        };
         let view = statusline_view(
             StatuslineInput {
                 transcript_path: Some(transcript.to_string_lossy().to_string()),
@@ -1300,7 +1305,12 @@ mod tests {
             "{\"type\":\"assistant\",\"usage\":{\"input_tokens\":50000,\"output_tokens\":10000,\"cache_read_input_tokens\":30000,\"cache_creation_input_tokens\":10000}}\n",
         ).unwrap();
 
-        let mut config = StatuslineConfig::default();
+        // Explicitly select Claude so this test is not affected by auto-detection
+        // choosing a different provider based on the local environment.
+        let mut config = StatuslineConfig {
+            provider: Some("claude".to_string()),
+            ..StatuslineConfig::default()
+        };
         config.context_limits.insert("sonnet".to_string(), 100_000);
 
         let view = statusline_view(
@@ -1974,20 +1984,21 @@ mod tests {
 
     #[test]
     fn explicit_provider_in_config_is_used() {
-        // A config with provider = "codex" should select the codex provider.
-        let config = StatuslineConfig {
+        // A config with an explicit provider must use that provider, bypassing
+        // auto-detection and the local environment.
+        let codex_config = StatuslineConfig {
             provider: Some("codex".to_string()),
             ..StatuslineConfig::default()
         };
-
-        let provider = crate::providers::detect_provider(config.provider.as_deref());
+        let provider = crate::providers::detect_provider(codex_config.provider.as_deref());
         assert_eq!(provider.name(), "codex");
 
-        // A config with no provider uses claude.
-        let config_default = StatuslineConfig::default();
-        let provider_default =
-            crate::providers::detect_provider(config_default.provider.as_deref());
-        assert_eq!(provider_default.name(), "claude");
+        let claude_config = StatuslineConfig {
+            provider: Some("claude".to_string()),
+            ..StatuslineConfig::default()
+        };
+        let provider_claude = crate::providers::detect_provider(claude_config.provider.as_deref());
+        assert_eq!(provider_claude.name(), "claude");
     }
 
     #[test]
