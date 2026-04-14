@@ -32,13 +32,15 @@ When a host invokes `annulus statusline`, it may pipe a JSON object to stdin. Al
 
 ## Provider Resolution Precedence
 
-Annulus resolves which provider to use through a three-level priority chain. The first level that produces a value wins.
+Annulus resolves which provider to use through a four-level priority chain. The first level that produces a value wins.
 
 1. **Stdin `provider` field** -- If the host pipes `{"provider": "codex", ...}`, annulus uses Codex regardless of config or session recency.
 
-2. **Config file `provider` setting** -- If `~/.config/annulus/statusline.toml` contains `provider = "codex"`, that provider is used when stdin does not specify one.
+2. **Host-specific stdin identity** -- If stdin includes `transcript_path`, annulus treats the render as Claude. If stdin includes `session_path` without an explicit provider, `.jsonl` infers Codex and `.json` infers Gemini.
 
-3. **Auto-detect by recency** -- When neither stdin nor config specifies a provider, annulus checks which provider (Claude, Codex, Gemini) has the most recently modified session file and uses that one. Ties favor Claude.
+3. **Config file `provider` setting** -- If `~/.config/annulus/statusline.toml` contains `provider = "codex"`, that provider is used when stdin does not identify the host session.
+
+4. **Auto-detect by recency** -- When neither stdin nor config identifies a provider, annulus checks which provider (Claude, Codex, Gemini) has the most recently modified session file and uses that one. Ties favor Claude.
 
 ---
 

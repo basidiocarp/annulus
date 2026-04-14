@@ -67,7 +67,7 @@ Reads host config files, checks that every registered hook path exists and point
 
 ## Multi-Session Support
 
-Annulus supports multiple simultaneous AI provider sessions. When a host (Claude Code, Codex, Gemini CLI) pipes JSON to stdin, the `provider` and `session_path` fields identify which session to display. This lets separate terminals show independent statuslines for different providers or different sessions of the same provider.
+Annulus supports multiple simultaneous AI provider sessions. When a host (Claude Code, Codex, Gemini CLI) pipes JSON to stdin, host-specific fields such as `transcript_path` and `session_path` identify which session to display; an explicit `provider` can still override that when needed. This lets separate terminals show independent statuslines for different providers or different sessions of the same provider.
 
 Provider resolution follows a three-level precedence chain: explicit stdin `provider` field, then config file setting, then auto-detection by most recent session file.
 

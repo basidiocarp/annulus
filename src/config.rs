@@ -76,7 +76,33 @@ impl StatuslineConfig {
                 return limit;
             }
         }
-        DEFAULT_CONTEXT_LIMIT
+        builtin_context_limit_for_model(model).unwrap_or(DEFAULT_CONTEXT_LIMIT)
+    }
+}
+
+fn builtin_context_limit_for_model(model: &str) -> Option<usize> {
+    let normalized = model
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-");
+
+    if normalized.contains("gpt-5")
+        || normalized.contains("gpt-5.2-codex")
+        || normalized.contains("gpt-5.4")
+    {
+        Some(400_000)
+    } else if normalized.contains("gemini-2.5-pro")
+        || normalized.contains("gemini-2.5-flash")
+        || normalized.contains("gemini-2.5-flash-lite")
+    {
+        Some(1_048_576)
+    } else if normalized.contains("o3") || normalized.contains("o4-mini") {
+        Some(200_000)
+    } else {
+        None
     }
 }
 
@@ -229,5 +255,33 @@ enabled = false
         assert_eq!(config.context_limit_for_model("Opus"), 300_000);
         assert_eq!(config.context_limit_for_model("OPUS"), 300_000);
         assert_eq!(config.context_limit_for_model("claude-opus-4"), 300_000);
+    }
+
+    #[test]
+    fn test_builtin_context_limit_for_latest_openai_models() {
+        let config = StatuslineConfig::default();
+        assert_eq!(config.context_limit_for_model("GPT-5.4 mini"), 400_000);
+        assert_eq!(config.context_limit_for_model("gpt-5.2-codex"), 400_000);
+    }
+
+    #[test]
+    fn test_builtin_context_limit_for_latest_gemini_models() {
+        let config = StatuslineConfig::default();
+        assert_eq!(
+            config.context_limit_for_model("Gemini 2.5 Flash"),
+            1_048_576
+        );
+        assert_eq!(
+            config.context_limit_for_model("gemini-2.5-flash-lite"),
+            1_048_576
+        );
+    }
+
+    #[test]
+    fn test_custom_context_limit_overrides_builtin_limit() {
+        let mut config = StatuslineConfig::default();
+        config.context_limits.insert("gpt-5.4".to_string(), 500_000);
+
+        assert_eq!(config.context_limit_for_model("GPT-5.4 mini"), 500_000);
     }
 }

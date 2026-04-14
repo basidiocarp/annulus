@@ -81,12 +81,12 @@ fn two_gemini_sessions_return_different_usage() {
     let session_a_path = dir.path().join("session-a.json");
     fs::write(&session_a_path, session_a_content).expect("write session A");
 
-    let session_b_content = r#"[
+    let second_session_content = r#"[
         {"role":"user","parts":[{"text":"hello"}]},
         {"role":"model","parts":[{"text":"world"}],"usageMetadata":{"promptTokenCount":500,"candidatesTokenCount":200,"totalTokenCount":700}}
     ]"#;
     let session_b_path = dir.path().join("session-b.json");
-    fs::write(&session_b_path, session_b_content).expect("write session B");
+    fs::write(&session_b_path, second_session_content).expect("write session B");
 
     let provider_a = GeminiProvider::with_session_file(session_a_path);
     let provider_b = GeminiProvider::with_session_file(session_b_path);

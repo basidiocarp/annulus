@@ -530,7 +530,10 @@ mod tests {
             .expect("no error")
             .expect("should have usage from targeted session");
 
-        assert_eq!(usage.prompt_tokens, 100, "should read targeted session, not global");
+        assert_eq!(
+            usage.prompt_tokens, 100,
+            "should read targeted session, not global"
+        );
         assert_eq!(usage.completion_tokens, 50);
     }
 
@@ -551,7 +554,10 @@ mod tests {
 
         let provider = GeminiProvider::with_session_file(session_path);
         let ts = provider.last_session_at();
-        assert!(ts.is_some(), "should return mtime for existing session file");
+        assert!(
+            ts.is_some(),
+            "should return mtime for existing session file"
+        );
         assert!(
             ts.expect("ts should be Some") > 1_577_836_800,
             "mtime should be after 2020-01-01"

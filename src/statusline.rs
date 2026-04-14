@@ -164,19 +164,26 @@ fn render_and_print_json(view: &StatuslineView, config: &StatuslineConfig) -> Re
 
 /// Resolve a `TokenProvider` from the input and config.
 ///
-/// Priority chain: stdin `provider` > config `provider` > auto-detect.
-/// When a non-Claude provider is selected, `session_path` from the input
-/// is passed through to enable session-scoped reads.
+/// Priority chain: stdin `provider` > host-specific stdin identity >
+/// config `provider` > auto-detect. When a non-Claude provider is selected,
+/// `session_path` from the input is passed through to enable session-scoped reads.
 fn resolve_provider(
     input: &StatuslineInput,
     config: &StatuslineConfig,
 ) -> Box<dyn providers::TokenProvider> {
-    let explicit = input.provider.as_deref().or(config.provider.as_deref());
+    let explicit = input
+        .provider
+        .as_deref()
+        .or_else(|| inferred_provider_from_input(input))
+        .or(config.provider.as_deref());
 
     // When we have both an explicit provider name and a session path, build
     // the provider directly — no need to construct a default provider via
     // detect_provider only to discard it.
-    let validated_session = input.session_path.as_deref().and_then(validated_session_path);
+    let validated_session = input
+        .session_path
+        .as_deref()
+        .and_then(validated_session_path);
 
     if let Some(name) = explicit {
         build_provider_by_name(name, input, validated_session.as_deref())
@@ -190,6 +197,32 @@ fn resolve_provider(
         } else {
             detected
         }
+    }
+}
+
+fn inferred_provider_from_input(input: &StatuslineInput) -> Option<&'static str> {
+    if input
+        .transcript_path
+        .as_deref()
+        .is_some_and(|path| !path.trim().is_empty())
+    {
+        return Some("claude");
+    }
+
+    match input
+        .session_path
+        .as_deref()
+        .and_then(validated_session_path)
+        .and_then(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .map(str::to_owned)
+        })
+        .as_deref()
+    {
+        Some("json") => Some("gemini"),
+        Some("jsonl") => Some("codex"),
+        _ => None,
     }
 }
 
@@ -365,8 +398,18 @@ fn context_pct_for_usage(usage: TokenUsage, context_limit: usize) -> u8 {
 }
 
 #[allow(clippy::if_same_then_else)] // o3-mini and o4-mini share identical pricing today; keep them explicit for future divergence
+#[allow(
+    clippy::too_many_lines,
+    reason = "Explicit model pricing table keeps operator-facing rates auditable in one place"
+)]
 fn pricing_for_model(display_name: &str) -> Option<Pricing> {
-    let normalized = display_name.to_ascii_lowercase();
+    let normalized = display_name
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-");
     if normalized.contains("opus") {
         Some(Pricing {
             input_per_million: 15.0,
@@ -404,10 +447,82 @@ fn pricing_for_model(display_name: &str) -> Option<Pricing> {
             cache_read_above_threshold: 0.0,
             cache_creation_above_threshold: 0.0,
         })
+    } else if normalized.contains("gpt-5.2-codex") {
+        Some(Pricing {
+            input_per_million: 1.75,
+            output_per_million: 14.00,
+            cache_read_per_million: 0.175,
+            cache_creation_per_million: 0.0,
+            cache_read_above_threshold: 0.175,
+            cache_creation_above_threshold: 0.0,
+        })
+    } else if normalized.contains("gpt-5.4-mini") {
+        Some(Pricing {
+            input_per_million: 0.75,
+            output_per_million: 4.50,
+            cache_read_per_million: 0.075,
+            cache_creation_per_million: 0.0,
+            cache_read_above_threshold: 0.075,
+            cache_creation_above_threshold: 0.0,
+        })
+    } else if normalized.contains("gpt-5.4-nano") {
+        Some(Pricing {
+            input_per_million: 0.20,
+            output_per_million: 1.25,
+            cache_read_per_million: 0.02,
+            cache_creation_per_million: 0.0,
+            cache_read_above_threshold: 0.02,
+            cache_creation_above_threshold: 0.0,
+        })
+    } else if normalized.contains("gpt-5.4") {
+        Some(Pricing {
+            input_per_million: 2.50,
+            output_per_million: 15.00,
+            cache_read_per_million: 0.25,
+            cache_creation_per_million: 0.0,
+            cache_read_above_threshold: 0.25,
+            cache_creation_above_threshold: 0.0,
+        })
+    } else if normalized.contains("gpt-5-mini") {
+        Some(Pricing {
+            input_per_million: 0.25,
+            output_per_million: 2.00,
+            cache_read_per_million: 0.025,
+            cache_creation_per_million: 0.0,
+            cache_read_above_threshold: 0.025,
+            cache_creation_above_threshold: 0.0,
+        })
+    } else if normalized.contains("gpt-5-nano") {
+        Some(Pricing {
+            input_per_million: 0.05,
+            output_per_million: 0.40,
+            cache_read_per_million: 0.005,
+            cache_creation_per_million: 0.0,
+            cache_read_above_threshold: 0.005,
+            cache_creation_above_threshold: 0.0,
+        })
+    } else if normalized.contains("gpt-5") {
+        Some(Pricing {
+            input_per_million: 1.25,
+            output_per_million: 10.00,
+            cache_read_per_million: 0.125,
+            cache_creation_per_million: 0.0,
+            cache_read_above_threshold: 0.125,
+            cache_creation_above_threshold: 0.0,
+        })
     } else if normalized.contains("gpt-4.1") {
         Some(Pricing {
             input_per_million: 2.00,
             output_per_million: 8.00,
+            cache_read_per_million: 0.0,
+            cache_creation_per_million: 0.0,
+            cache_read_above_threshold: 0.0,
+            cache_creation_above_threshold: 0.0,
+        })
+    } else if normalized.contains("gemini-2.5-flash-lite") {
+        Some(Pricing {
+            input_per_million: 0.10,
+            output_per_million: 0.40,
             cache_read_per_million: 0.0,
             cache_creation_per_million: 0.0,
             cache_read_above_threshold: 0.0,
@@ -1610,6 +1725,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pricing_for_model_recognizes_latest_openai_variants() {
+        let gpt5 = pricing_for_model("GPT-5").expect("gpt-5 pricing");
+        assert!((gpt5.input_per_million - 1.25).abs() < f64::EPSILON);
+        assert!((gpt5.output_per_million - 10.0).abs() < f64::EPSILON);
+
+        let gpt54mini = pricing_for_model("GPT-5.4 mini").expect("gpt-5.4 mini pricing");
+        assert!((gpt54mini.input_per_million - 0.75).abs() < f64::EPSILON);
+        assert!((gpt54mini.output_per_million - 4.5).abs() < f64::EPSILON);
+
+        let codex = pricing_for_model("gpt-5.2-codex").expect("gpt-5.2-codex pricing");
+        assert!((codex.input_per_million - 1.75).abs() < f64::EPSILON);
+        assert!((codex.output_per_million - 14.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn pricing_for_model_recognizes_latest_gemini_variants() {
+        let flash_lite =
+            pricing_for_model("Gemini 2.5 Flash-Lite").expect("gemini 2.5 flash-lite pricing");
+        assert!((flash_lite.input_per_million - 0.10).abs() < f64::EPSILON);
+        assert!((flash_lite.output_per_million - 0.40).abs() < f64::EPSILON);
+
+        let flash = pricing_for_model("gemini 2.5 flash").expect("gemini 2.5 flash pricing");
+        assert!((flash.input_per_million - 0.15).abs() < f64::EPSILON);
+        assert!((flash.output_per_million - 0.60).abs() < f64::EPSILON);
+    }
+
     fn default_view() -> StatuslineView {
         StatuslineView {
             context_pct: None,
@@ -2192,6 +2334,69 @@ mod tests {
     }
 
     #[test]
+    fn transcript_path_forces_claude_before_config_provider() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let transcript = temp_dir.path().join("transcript.jsonl");
+        fs::write(
+            &transcript,
+            "{\"type\":\"assistant\",\"usage\":{\"input_tokens\":50000,\"output_tokens\":10000,\"cache_read_input_tokens\":30000,\"cache_creation_input_tokens\":10000}}\n",
+        )
+        .unwrap();
+
+        let mut config = StatuslineConfig {
+            provider: Some("codex".to_string()),
+            ..StatuslineConfig::default()
+        };
+        config.context_limits.insert("sonnet".to_string(), 100_000);
+
+        let view = statusline_view(
+            StatuslineInput {
+                transcript_path: Some(transcript.to_string_lossy().to_string()),
+                provider: None,
+                session_path: None,
+                model: Some(StatuslineModel {
+                    display_name: Some("Claude Sonnet 4.6".to_string()),
+                }),
+                workspace: None,
+            },
+            &config,
+        );
+
+        assert_eq!(view.model_name, "sonnet 4.6");
+        assert_eq!(view.context_pct, Some(90));
+    }
+
+    #[test]
+    fn session_path_json_infers_gemini_before_config_provider() {
+        let input = StatuslineInput {
+            provider: None,
+            session_path: Some("/tmp/session.json".to_string()),
+            ..StatuslineInput::default()
+        };
+        let config = StatuslineConfig {
+            provider: Some("codex".to_string()),
+            ..StatuslineConfig::default()
+        };
+        let view = statusline_view(input, &config);
+        assert_eq!(view.model_name, "gemini");
+    }
+
+    #[test]
+    fn session_path_jsonl_infers_codex_before_config_provider() {
+        let input = StatuslineInput {
+            provider: None,
+            session_path: Some("/tmp/session.jsonl".to_string()),
+            ..StatuslineInput::default()
+        };
+        let config = StatuslineConfig {
+            provider: Some("gemini".to_string()),
+            ..StatuslineConfig::default()
+        };
+        let view = statusline_view(input, &config);
+        assert_eq!(view.model_name, "codex");
+    }
+
+    #[test]
     fn config_provider_used_when_no_stdin_provider() {
         // No stdin provider, config says "gemini". Config wins.
         let input = StatuslineInput::default();
@@ -2213,7 +2418,9 @@ mod tests {
         // and produces a known provider name.
         let known = ["claude", "codex", "gemini"];
         assert!(
-            known.iter().any(|&n| view.model_name.contains(n) || view.model_name == "unknown"),
+            known
+                .iter()
+                .any(|&n| view.model_name.contains(n) || view.model_name == "unknown"),
             "model_name should be from a known provider, got '{}'",
             view.model_name,
         );
