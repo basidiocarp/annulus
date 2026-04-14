@@ -175,8 +175,8 @@ fn find_command_on_path(cmd: &str) -> Option<PathBuf> {
                 return Some(candidate);
             }
 
-            let pathext = std::env::var_os("PATHEXT")
-                .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+            let pathext =
+                std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
 
             for ext in pathext.to_string_lossy().split(';') {
                 if ext.is_empty() {
