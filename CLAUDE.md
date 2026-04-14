@@ -16,6 +16,8 @@ Annulus is a small Rust binary providing cross-ecosystem operator utilities for 
 - Does not package hooks, skills, or prompts (Lamella owns that)
 - Does not handle installation or ecosystem repair (Stipe owns that)
 - Does not track tasks or coordination records (Canopy owns that)
+- Does not orchestrate workflows or manage dispatch (Hymenium owns that)
+- Does not host agent execution or manage runtime sessions (Volva owns that)
 
 ---
 
