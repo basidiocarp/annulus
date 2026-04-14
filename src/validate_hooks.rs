@@ -221,7 +221,10 @@ pub fn run() -> Result<()> {
 
     let mut any_failed = false;
     let mut stale_count = 0;
+    #[cfg(unix)]
     let mut broken_count = 0;
+    #[cfg(not(unix))]
+    let broken_count = 0;
 
     for settings_path in &existing_files {
         println!("Checking {}...", settings_path.display());
