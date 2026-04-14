@@ -143,10 +143,17 @@ fn read_session_file(path: &std::path::Path) -> anyhow::Result<Option<TokenUsage
 /// Resolves the session directory from `$GEMINI_HISTORY_DIR` or
 /// `~/.gemini/tmp/`, scans for the most recent `.json` session file, and
 /// parses its JSON array using cumulative token-count semantics.
+///
+/// When `session_file` is set, reads that file directly instead of
+/// scanning for the most recent session. This supports multi-session
+/// awareness where each terminal addresses its own session file.
 #[derive(Debug)]
 pub struct GeminiProvider {
     /// Resolved Gemini session tmp directory. `None` when home resolution failed.
     tmp_dir: Option<PathBuf>,
+    /// Optional explicit session file path. When set, this file is read
+    /// directly instead of scanning for the most recent session.
+    session_file: Option<PathBuf>,
 }
 
 impl GeminiProvider {
@@ -155,6 +162,7 @@ impl GeminiProvider {
     pub fn new() -> Self {
         Self {
             tmp_dir: resolve_gemini_tmp(),
+            session_file: None,
         }
     }
 
@@ -166,6 +174,19 @@ impl GeminiProvider {
     pub fn with_tmp_dir(tmp_dir: PathBuf) -> Self {
         Self {
             tmp_dir: Some(tmp_dir),
+            session_file: None,
+        }
+    }
+
+    /// Create a `GeminiProvider` that reads a specific session file directly.
+    ///
+    /// When set, `session_usage()` reads this file instead of scanning for
+    /// the most recent session in the tmp directory.
+    #[must_use]
+    pub fn with_session_file(session_file: PathBuf) -> Self {
+        Self {
+            tmp_dir: resolve_gemini_tmp(),
+            session_file: Some(session_file),
         }
     }
 }
@@ -188,13 +209,20 @@ impl TokenProvider for GeminiProvider {
             .is_some_and(|p| p.exists() && p.is_dir())
     }
 
-    /// Read token usage from the most recent Gemini session file.
+    /// Read token usage from the targeted or most recent Gemini session file.
     ///
-    /// Finds the `.json` file with the highest mtime in the session directory,
+    /// When `session_file` is set, reads that file directly. Otherwise finds
+    /// the `.json` file with the highest mtime in the session directory,
     /// parses the JSON array, and accumulates token counts using cumulative
-    /// semantics. Returns `Ok(None)` when no session files exist or the most
-    /// recent file contains no usable token entries.
+    /// semantics. Returns `Ok(None)` when no session files exist or the file
+    /// contains no usable token entries.
     fn session_usage(&self) -> anyhow::Result<Option<TokenUsage>> {
+        if let Some(path) = &self.session_file {
+            if path.exists() {
+                return read_session_file(path);
+            }
+            return Ok(None);
+        }
         let Some(dir) = &self.tmp_dir else {
             return Ok(None);
         };
@@ -207,9 +235,14 @@ impl TokenProvider for GeminiProvider {
         read_session_file(&path)
     }
 
-    /// Returns the mtime (seconds since Unix epoch) of the most recent Gemini
-    /// session file, or `None` when no session files are found.
+    /// Returns the mtime (seconds since Unix epoch) of the targeted or most
+    /// recent Gemini session file, or `None` when no session files are found.
     fn last_session_at(&self) -> Option<u64> {
+        if let Some(path) = &self.session_file {
+            let meta = fs::metadata(path).ok()?;
+            let mtime = meta.modified().ok()?;
+            return Some(mtime.duration_since(UNIX_EPOCH).ok()?.as_secs());
+        }
         let dir = self.tmp_dir.as_deref()?;
         if !dir.exists() {
             return None;
@@ -448,5 +481,88 @@ mod tests {
             ts.expect("ts should be Some") > 1_577_836_800,
             "mtime should be after 2020-01-01"
         );
+    }
+
+    // ── session_file (session-scoped provider resolution) ────────────────────
+
+    #[test]
+    fn with_session_file_reads_specified_file() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let content = r#"[
+            {"role":"user","parts":[{"text":"hello"}]},
+            {"role":"model","parts":[{"text":"world"}],"usageMetadata":{"promptTokenCount":250,"candidatesTokenCount":80,"totalTokenCount":330}}
+        ]"#;
+        let session_path = dir.path().join("my-session.json");
+        fs::write(&session_path, content).expect("write session file");
+
+        let provider = GeminiProvider::with_session_file(session_path);
+        let usage = provider
+            .session_usage()
+            .expect("no error")
+            .expect("should have usage from session file");
+        assert_eq!(usage.prompt_tokens, 250);
+        assert_eq!(usage.completion_tokens, 80);
+    }
+
+    #[test]
+    fn with_session_file_ignores_most_recent_global_session() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+
+        // Write a "global" session in the tmp dir with large token counts.
+        let global_dir = dir.path().join("global-tmp");
+        let global_content = r#"[
+            {"role":"user","parts":[{"text":"q"}]},
+            {"role":"model","parts":[{"text":"a"}],"usageMetadata":{"promptTokenCount":9999,"candidatesTokenCount":8888,"totalTokenCount":18887}}
+        ]"#;
+        write_session(&global_dir, "global.json", global_content);
+
+        // Write a targeted session file with smaller counts.
+        let session_content = r#"[
+            {"role":"user","parts":[{"text":"q"}]},
+            {"role":"model","parts":[{"text":"a"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":50,"totalTokenCount":150}}
+        ]"#;
+        let session_path = dir.path().join("targeted-session.json");
+        fs::write(&session_path, session_content).expect("write session file");
+
+        let provider = GeminiProvider::with_session_file(session_path);
+        let usage = provider
+            .session_usage()
+            .expect("no error")
+            .expect("should have usage from targeted session");
+
+        assert_eq!(usage.prompt_tokens, 100, "should read targeted session, not global");
+        assert_eq!(usage.completion_tokens, 50);
+    }
+
+    #[test]
+    fn with_session_file_returns_none_when_file_missing() {
+        let provider = GeminiProvider::with_session_file(PathBuf::from(
+            "/tmp/nonexistent-gemini-session.json",
+        ));
+        let result = provider.session_usage().expect("no error");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn with_session_file_last_session_at_returns_file_mtime() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let session_path = dir.path().join("session.json");
+        fs::write(&session_path, "[]").expect("write session file");
+
+        let provider = GeminiProvider::with_session_file(session_path);
+        let ts = provider.last_session_at();
+        assert!(ts.is_some(), "should return mtime for existing session file");
+        assert!(
+            ts.expect("ts should be Some") > 1_577_836_800,
+            "mtime should be after 2020-01-01"
+        );
+    }
+
+    #[test]
+    fn with_session_file_last_session_at_returns_none_when_missing() {
+        let provider = GeminiProvider::with_session_file(PathBuf::from(
+            "/tmp/nonexistent-gemini-session.json",
+        ));
+        assert!(provider.last_session_at().is_none());
     }
 }

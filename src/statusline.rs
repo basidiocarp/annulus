@@ -17,6 +17,10 @@ struct StatuslineInput {
     #[serde(default)]
     transcript_path: Option<String>,
     #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    session_path: Option<String>,
+    #[serde(default)]
     model: Option<StatuslineModel>,
     #[serde(default)]
     workspace: Option<StatuslineWorkspace>,
@@ -158,23 +162,90 @@ fn render_and_print_json(view: &StatuslineView, config: &StatuslineConfig) -> Re
     Ok(())
 }
 
-fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> StatuslineView {
-    // Route through the provider abstraction. `detect_provider` selects the
-    // active provider from the config's `provider` field (or auto-detects by
-    // comparing the most recent session timestamp across Claude, Codex, and
-    // Gemini). Claude uses the rich transcript path (`read_transcript_usage`)
-    // which provides per-turn context data. Non-Claude providers use
-    // `session_usage()` for cumulative token counts; context-bar / per-turn
-    // data is not available for those providers in the current pass.
-    let provider: Box<dyn providers::TokenProvider> = {
-        let explicit = config.provider.as_deref();
-        match providers::detect_provider(explicit) {
-            p if p.name() == "claude" => Box::new(providers::claude::ClaudeProvider {
-                transcript_path: input.transcript_path.clone(),
-            }),
-            p => p,
+/// Resolve a `TokenProvider` from the input and config.
+///
+/// Priority chain: stdin `provider` > config `provider` > auto-detect.
+/// When a non-Claude provider is selected, `session_path` from the input
+/// is passed through to enable session-scoped reads.
+fn resolve_provider(
+    input: &StatuslineInput,
+    config: &StatuslineConfig,
+) -> Box<dyn providers::TokenProvider> {
+    let explicit = input.provider.as_deref().or(config.provider.as_deref());
+
+    // When we have both an explicit provider name and a session path, build
+    // the provider directly — no need to construct a default provider via
+    // detect_provider only to discard it.
+    let validated_session = input.session_path.as_deref().and_then(validated_session_path);
+
+    if let Some(name) = explicit {
+        build_provider_by_name(name, input, validated_session.as_deref())
+    } else {
+        // Auto-detect: pick the most recently active provider, then
+        // overlay session identity if available.
+        let detected = providers::detect_provider(None);
+        let name = detected.name();
+        if validated_session.is_some() || name == "claude" {
+            build_provider_by_name(name, input, validated_session.as_deref())
+        } else {
+            detected
         }
-    };
+    }
+}
+
+/// Validate a session path from stdin.
+///
+/// Rejects non-absolute paths and paths without a recognised session file
+/// extension (`.jsonl` for Codex, `.json` for Gemini). Returns `None` for
+/// invalid paths so the provider falls back to its default discovery.
+fn validated_session_path(raw: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() {
+        return None;
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext != "jsonl" && ext != "json" {
+        return None;
+    }
+    Some(path)
+}
+
+/// Construct a provider by name, wiring session identity from the input.
+fn build_provider_by_name(
+    name: &str,
+    input: &StatuslineInput,
+    session_path: Option<&Path>,
+) -> Box<dyn providers::TokenProvider> {
+    match name {
+        "claude" => Box::new(providers::claude::ClaudeProvider {
+            transcript_path: input.transcript_path.clone(),
+        }),
+        "codex" => match session_path {
+            Some(path) => Box::new(providers::codex::CodexProvider::with_session_file(
+                path.to_path_buf(),
+            )),
+            None => Box::new(providers::codex::CodexProvider::new()),
+        },
+        "gemini" => match session_path {
+            Some(path) => Box::new(providers::gemini::GeminiProvider::with_session_file(
+                path.to_path_buf(),
+            )),
+            None => Box::new(providers::gemini::GeminiProvider::new()),
+        },
+        _ => providers::detect_provider(Some(name)),
+    }
+}
+
+fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> StatuslineView {
+    // Route through the provider abstraction. `resolve_provider` selects the
+    // active provider from the input's `provider` field, the config's
+    // `provider` field, or auto-detects by comparing the most recent session
+    // timestamp across Claude, Codex, and Gemini. Claude uses the rich
+    // transcript path (`read_transcript_usage`) which provides per-turn
+    // context data. Non-Claude providers use `session_usage()` for cumulative
+    // token counts; context-bar / per-turn data is not available for those
+    // providers in the current pass.
+    let provider = resolve_provider(&input, config);
 
     // For Claude, read the full transcript breakdown via the streaming path.
     // For other providers, call session_usage() for cumulative token counts.
@@ -1329,6 +1400,8 @@ mod tests {
         let view = statusline_view(
             StatuslineInput {
                 transcript_path: Some(transcript.to_string_lossy().to_string()),
+                provider: None,
+                session_path: None,
                 model: Some(StatuslineModel {
                     display_name: Some("Claude Sonnet 4.6".to_string()),
                 }),
@@ -1369,6 +1442,8 @@ mod tests {
         let view = statusline_view(
             StatuslineInput {
                 transcript_path: Some(transcript.to_string_lossy().to_string()),
+                provider: None,
+                session_path: None,
                 model: Some(StatuslineModel {
                     display_name: Some("Claude Sonnet 4.6".to_string()),
                 }),
@@ -2066,6 +2141,81 @@ mod tests {
         assert!(
             !names.contains(&"cortina"),
             "cortina should not be in default segments"
+        );
+    }
+
+    // ── StatuslineInput: provider and session_path parsing ───────────────────
+
+    #[test]
+    fn parse_statusline_input_provider_and_session_path() {
+        let input = parse_statusline_input_from_reader(std::io::Cursor::new(
+            br#"{"provider":"codex","session_path":"/tmp/my-session.jsonl"}"#,
+        ))
+        .expect("should parse");
+
+        assert_eq!(input.provider.as_deref(), Some("codex"));
+        assert_eq!(input.session_path.as_deref(), Some("/tmp/my-session.jsonl"));
+    }
+
+    #[test]
+    fn parse_statusline_input_provider_and_session_path_default_to_none() {
+        let input = parse_statusline_input_from_reader(std::io::Cursor::new(
+            br#"{"transcript_path":"/tmp/transcript.jsonl"}"#,
+        ))
+        .expect("should parse");
+
+        assert!(input.provider.is_none());
+        assert!(input.session_path.is_none());
+        assert_eq!(
+            input.transcript_path.as_deref(),
+            Some("/tmp/transcript.jsonl")
+        );
+    }
+
+    // ── Provider priority chain ─────────────────────────────────────────────
+
+    #[test]
+    fn stdin_provider_overrides_config_provider() {
+        // stdin says "codex", config says "claude". stdin wins.
+        let input = StatuslineInput {
+            provider: Some("codex".to_string()),
+            ..StatuslineInput::default()
+        };
+        let config = StatuslineConfig {
+            provider: Some("claude".to_string()),
+            ..StatuslineConfig::default()
+        };
+        let view = statusline_view(input, &config);
+        // When codex is selected but no session data is available, model_name
+        // falls back to the provider name "codex".
+        assert_eq!(view.model_name, "codex");
+    }
+
+    #[test]
+    fn config_provider_used_when_no_stdin_provider() {
+        // No stdin provider, config says "gemini". Config wins.
+        let input = StatuslineInput::default();
+        let config = StatuslineConfig {
+            provider: Some("gemini".to_string()),
+            ..StatuslineConfig::default()
+        };
+        let view = statusline_view(input, &config);
+        assert_eq!(view.model_name, "gemini");
+    }
+
+    #[test]
+    fn no_provider_falls_through_to_auto_detect() {
+        // No stdin provider, no config provider. Auto-detect runs.
+        let input = StatuslineInput::default();
+        let config = StatuslineConfig::default();
+        let view = statusline_view(input, &config);
+        // Auto-detect is environment-dependent; we just verify it doesn't panic
+        // and produces a known provider name.
+        let known = ["claude", "codex", "gemini"];
+        assert!(
+            known.iter().any(|&n| view.model_name.contains(n) || view.model_name == "unknown"),
+            "model_name should be from a known provider, got '{}'",
+            view.model_name,
         );
     }
 }

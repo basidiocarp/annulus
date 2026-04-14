@@ -294,10 +294,17 @@ fn read_session_file(path: &std::path::Path) -> anyhow::Result<Option<TokenUsage
 /// Resolves the Codex home directory from `$CODEX_HOME` or `~/.codex`,
 /// scans the `sessions/` date hierarchy and `archived_sessions/` flat
 /// directory, and parses the most recent JSONL session file.
+///
+/// When `session_file` is set, reads that file directly instead of
+/// scanning for the most recent session. This supports multi-session
+/// awareness where each terminal addresses its own session file.
 #[derive(Debug)]
 pub struct CodexProvider {
     /// Resolved Codex home directory. `None` when home resolution failed.
     codex_home: Option<PathBuf>,
+    /// Optional explicit session file path. When set, this file is read
+    /// directly instead of scanning for the most recent session.
+    session_file: Option<PathBuf>,
 }
 
 impl CodexProvider {
@@ -306,6 +313,7 @@ impl CodexProvider {
     pub fn new() -> Self {
         Self {
             codex_home: resolve_codex_home(),
+            session_file: None,
         }
     }
 
@@ -317,6 +325,19 @@ impl CodexProvider {
     pub fn with_home(codex_home: PathBuf) -> Self {
         Self {
             codex_home: Some(codex_home),
+            session_file: None,
+        }
+    }
+
+    /// Create a `CodexProvider` that reads a specific session file directly.
+    ///
+    /// When set, `session_usage()` reads this file instead of scanning for
+    /// the most recent session under the Codex home directory.
+    #[must_use]
+    pub fn with_session_file(session_file: PathBuf) -> Self {
+        Self {
+            codex_home: resolve_codex_home(),
+            session_file: Some(session_file),
         }
     }
 }
@@ -339,13 +360,20 @@ impl TokenProvider for CodexProvider {
             .is_some_and(|p| p.exists() && p.is_dir())
     }
 
-    /// Read token usage from the most recent Codex session file.
+    /// Read token usage from the targeted or most recent Codex session file.
     ///
-    /// Scans `$CODEX_HOME/sessions/` and `$CODEX_HOME/archived_sessions/`,
-    /// picks the file with the highest mtime, and parses its NDJSON content.
-    /// Returns `Ok(None)` when no session files exist or the most recent file
-    /// contains no usable token-count entries.
+    /// When `session_file` is set, reads that file directly. Otherwise scans
+    /// `$CODEX_HOME/sessions/` and `$CODEX_HOME/archived_sessions/`, picks
+    /// the file with the highest mtime, and parses its NDJSON content.
+    /// Returns `Ok(None)` when no session files exist or the file contains
+    /// no usable token-count entries.
     fn session_usage(&self) -> anyhow::Result<Option<TokenUsage>> {
+        if let Some(path) = &self.session_file {
+            if path.exists() {
+                return read_session_file(path);
+            }
+            return Ok(None);
+        }
         let Some(home) = &self.codex_home else {
             return Ok(None);
         };
@@ -358,9 +386,14 @@ impl TokenProvider for CodexProvider {
         read_session_file(&path)
     }
 
-    /// Returns the mtime (seconds since Unix epoch) of the most recent Codex
-    /// session file, or `None` when no session files are found.
+    /// Returns the mtime (seconds since Unix epoch) of the targeted or most
+    /// recent Codex session file, or `None` when no session files are found.
     fn last_session_at(&self) -> Option<u64> {
+        if let Some(path) = &self.session_file {
+            let meta = fs::metadata(path).ok()?;
+            let mtime = meta.modified().ok()?;
+            return Some(mtime.duration_since(UNIX_EPOCH).ok()?.as_secs());
+        }
         let home = self.codex_home.as_deref()?;
         if !home.exists() {
             return None;
@@ -632,6 +665,79 @@ mod tests {
     #[test]
     fn last_session_at_returns_none_when_home_missing() {
         let provider = CodexProvider::with_home(PathBuf::from("/tmp/nonexistent-codex-annulus"));
+        assert!(provider.last_session_at().is_none());
+    }
+
+    // ── session_file (session-scoped provider resolution) ────────────────────
+
+    #[test]
+    fn with_session_file_reads_specified_file() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let content = "{\"timestamp\":\"2025-09-11T18:25:40.670Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model\":\"gpt-5\",\"total_token_usage\":{\"input_tokens\":400,\"cached_input_tokens\":40,\"output_tokens\":150,\"reasoning_output_tokens\":0,\"total_tokens\":550},\"last_token_usage\":{\"input_tokens\":400,\"cached_input_tokens\":40,\"output_tokens\":150,\"reasoning_output_tokens\":0,\"total_tokens\":550}}}}\n";
+        let session_path = dir.path().join("my-session.jsonl");
+        fs::write(&session_path, content).expect("write session file");
+
+        let provider = CodexProvider::with_session_file(session_path);
+        let usage = provider
+            .session_usage()
+            .expect("no error")
+            .expect("should have usage from session file");
+        assert_eq!(usage.prompt_tokens, 400);
+        assert_eq!(usage.completion_tokens, 150);
+        assert_eq!(usage.cache_read_tokens, 40);
+    }
+
+    #[test]
+    fn with_session_file_ignores_most_recent_global_session() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+
+        // Write a "global" session with different token counts.
+        let global_content = "{\"timestamp\":\"2025-09-11T18:25:40.670Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model\":\"gpt-5\",\"total_token_usage\":{\"input_tokens\":9999,\"cached_input_tokens\":999,\"output_tokens\":8888,\"reasoning_output_tokens\":0,\"total_tokens\":18886},\"last_token_usage\":{\"input_tokens\":9999,\"cached_input_tokens\":999,\"output_tokens\":8888,\"reasoning_output_tokens\":0,\"total_tokens\":18886}}}}\n";
+        write_dated_session(dir.path(), "global.jsonl", global_content);
+
+        // Write a specific session file with smaller counts.
+        let session_content = "{\"timestamp\":\"2025-09-11T18:25:40.670Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model\":\"gpt-5\",\"total_token_usage\":{\"input_tokens\":100,\"cached_input_tokens\":10,\"output_tokens\":50,\"reasoning_output_tokens\":0,\"total_tokens\":150},\"last_token_usage\":{\"input_tokens\":100,\"cached_input_tokens\":10,\"output_tokens\":50,\"reasoning_output_tokens\":0,\"total_tokens\":150}}}}\n";
+        let session_path = dir.path().join("targeted-session.jsonl");
+        fs::write(&session_path, session_content).expect("write session file");
+
+        let provider = CodexProvider::with_session_file(session_path);
+        let usage = provider
+            .session_usage()
+            .expect("no error")
+            .expect("should have usage from targeted session");
+
+        // Must read the targeted file, not the global one.
+        assert_eq!(usage.prompt_tokens, 100, "should read targeted session, not global");
+        assert_eq!(usage.completion_tokens, 50);
+    }
+
+    #[test]
+    fn with_session_file_returns_none_when_file_missing() {
+        let provider =
+            CodexProvider::with_session_file(PathBuf::from("/tmp/nonexistent-codex-session.jsonl"));
+        let result = provider.session_usage().expect("no error");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn with_session_file_last_session_at_returns_file_mtime() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        fs::write(&session_path, "{}").expect("write session file");
+
+        let provider = CodexProvider::with_session_file(session_path);
+        let ts = provider.last_session_at();
+        assert!(ts.is_some(), "should return mtime for existing session file");
+        assert!(
+            ts.expect("ts should be Some") > 1_577_836_800,
+            "mtime should be after 2020-01-01"
+        );
+    }
+
+    #[test]
+    fn with_session_file_last_session_at_returns_none_when_missing() {
+        let provider =
+            CodexProvider::with_session_file(PathBuf::from("/tmp/nonexistent-codex-session.jsonl"));
         assert!(provider.last_session_at().is_none());
     }
 }
