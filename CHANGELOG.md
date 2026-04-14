@@ -4,6 +4,14 @@ All notable changes to Annulus are documented in this file.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-04-14
+
+### Fixed
+
+- **Release lockfile repair**: restored the valid `dirs-sys` and `heck` lock entries after the `0.5.1` release bump accidentally rewrote unrelated `0.5.0` dependency versions to nonexistent `0.5.1` entries.
+- **Host-aware provider routing**: `transcript_path` now forces Claude and `session_path` now infers Codex or Gemini before config or recency fallback, so mixed-provider terminals do not render Claude model labels with missing Claude context data.
+- **Statusline model coverage**: added built-in context-window recognition and pricing aliases for current GPT-5 and Gemini 2.5 model families so new model names do not fall back to stale defaults as often.
+
 ## [0.5.1] - 2026-04-14
 
 ### Fixed
