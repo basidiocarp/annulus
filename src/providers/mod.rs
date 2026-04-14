@@ -191,12 +191,15 @@ mod tests {
 
     #[test]
     fn gemini_provider_returns_none_when_dir_missing() {
-        let provider = GeminiProvider::new();
+        // Use a nonexistent directory to guarantee a deterministic None result.
+        let provider = GeminiProvider::with_tmp_dir(std::path::PathBuf::from(
+            "/tmp/nonexistent-gemini-annulus",
+        ));
         let result = provider.session_usage();
         assert!(result.is_ok(), "gemini session_usage should not error");
         assert!(
             result.unwrap().is_none(),
-            "gemini should return None in this pass"
+            "gemini should return None when session dir is missing"
         );
     }
 
@@ -236,10 +239,12 @@ mod tests {
     }
 
     #[test]
-    fn gemini_last_session_at_is_none() {
-        // Gemini is still a stub; must return None for last_session_at.
+    fn gemini_last_session_at_does_not_panic() {
+        // GeminiProvider is now a real reader. last_session_at() is
+        // environment-dependent (depends on whether ~/.gemini/tmp/ has files).
+        // This test only verifies the method completes without panicking.
         let gemini = GeminiProvider::new();
-        assert!(gemini.last_session_at().is_none());
+        let _ = gemini.last_session_at();
     }
 
     #[test]
