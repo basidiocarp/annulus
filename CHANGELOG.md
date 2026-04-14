@@ -4,6 +4,25 @@ All notable changes to Annulus are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-14
+
+### Added
+
+- **Codex provider**: reads `~/.codex/sessions/` NDJSON transcripts with delta token resolution and cache alias normalization.
+- **Gemini provider**: reads `~/.gemini/tmp/` JSON session files with cumulative/per-turn token semantics.
+- **Recency-based auto-detect**: `detect_by_recency()` picks the most recently active provider when stdin doesn't specify one.
+- **Provider wiring**: statusline renders token usage from whichever provider is active, not just Claude.
+- **Extended pricing**: o3-mini, o4-mini, gpt-4.1, gemini-2.5-pro, gemini-2.5-flash model pricing.
+- **PATH-based hook validation**: `validate-hooks` now checks whether hook commands exist on `$PATH` and reports their resolved location.
+
+### Changed
+
+- Removed cortina from default statusline segments (still available for explicit opt-in).
+
+### Fixed
+
+- Removed stale `#[allow(dead_code)]` annotations now that providers are fully wired.
+
 ## [0.3.0] - 2026-04-12
 
 ### Added
