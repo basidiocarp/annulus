@@ -26,7 +26,6 @@ const SESSION_BOUNDARY_SECS_F64: f64 = (5 * 3600) as f64;
 
 /// A single JSONL entry from a Claude transcript file.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // Fields are consumed via serde deserialization only.
 pub(crate) struct TranscriptEntry {
     #[serde(rename = "type")]
     pub entry_type: String,
@@ -248,9 +247,6 @@ pub(crate) struct RawUsage {
 }
 
 impl RawUsage {
-    // Used by ClaudeProvider::session_usage — lint fires because session_usage
-    // is not yet called from non-test production code.
-    #[allow(dead_code)]
     pub(crate) fn prompt_tokens(self) -> u32 {
         self.input_tokens
             .saturating_add(self.cache_read_input_tokens)
@@ -392,8 +388,6 @@ pub(crate) fn read_transcript_usage(path: &str) -> anyhow::Result<TranscriptUsag
 /// (`transcript_path` field). Without a path the provider reports available
 /// (Claude is always the default) but returns `Ok(None)` for session usage.
 #[derive(Debug, Default)]
-#[allow(dead_code)] // Fields are read by session_usage; lint fires because
-// session_usage is not yet called from non-test production code.
 pub struct ClaudeProvider {
     /// Optional transcript path, set from the stdin payload.
     pub transcript_path: Option<String>,

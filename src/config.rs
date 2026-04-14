@@ -28,7 +28,6 @@ pub struct SegmentEntry {
     pub enabled: bool,
 }
 
-#[allow(dead_code)]
 fn default_true() -> bool {
     true
 }

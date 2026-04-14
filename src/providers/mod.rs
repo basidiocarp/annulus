@@ -19,7 +19,6 @@ pub use gemini::GeminiProvider;
 /// per session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[must_use]
-#[allow(dead_code)] // Public API — not all callers are wired in this pass.
 #[allow(
     clippy::struct_field_names,
     reason = "Field names are semantic token categories, not redundant postfixes"
@@ -32,9 +31,6 @@ pub struct TokenUsage {
 }
 
 /// A coding-agent session data source.
-#[allow(dead_code)] // Trait methods are part of the provider API; `is_available`
-// and `session_usage` are not yet called from all production
-// paths in this pass.
 pub trait TokenProvider {
     /// Short name for display and config ("claude", "codex", "gemini").
     fn name(&self) -> &'static str;
