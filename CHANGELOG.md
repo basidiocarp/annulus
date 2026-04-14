@@ -4,6 +4,12 @@ All notable changes to Annulus are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-04-14
+
+### Fixed
+
+- **musl release linking**: bundle SQLite for musl targets so static release builds do not depend on a system `sqlite3` library.
+
 ## [0.4.1] - 2026-04-14
 
 ### Fixed
