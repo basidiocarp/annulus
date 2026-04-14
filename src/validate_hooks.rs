@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 enum ValidationStatus {
     Ok,
     Stale,
+    #[cfg(unix)]
     Broken,
 }
 
@@ -274,6 +275,7 @@ pub fn run() -> Result<()> {
                         stale_count += 1;
                         any_failed = true;
                     }
+                    #[cfg(unix)]
                     ValidationStatus::Broken => {
                         println!("  [BROKEN]  {event} → {command} (not executable)");
                         broken_count += 1;
