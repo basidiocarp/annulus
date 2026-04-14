@@ -150,26 +150,48 @@ fn extract_bare_command(command: &str) -> Option<&str> {
 
 /// Searches PATH for `cmd` and returns the full path if found and executable.
 fn find_command_on_path(cmd: &str) -> Option<PathBuf> {
-    let path_var = std::env::var("PATH").ok()?;
+    let path_var = std::env::var_os("PATH")?;
 
-    for dir in path_var.split(':') {
-        if dir.is_empty() {
+    for dir in std::env::split_paths(&path_var) {
+        if dir.as_os_str().is_empty() {
             continue;
         }
-        let candidate = PathBuf::from(dir).join(cmd);
-        if candidate.exists() {
-            #[cfg(unix)]
-            {
+
+        #[cfg(unix)]
+        {
+            let candidate = dir.join(cmd);
+            if let Ok(meta) = std::fs::metadata(&candidate) {
                 use std::os::unix::fs::PermissionsExt;
-                if let Ok(meta) = std::fs::metadata(&candidate) {
-                    if (meta.permissions().mode() & 0o111) != 0 {
-                        return Some(candidate);
-                    }
+                if meta.is_file() && (meta.permissions().mode() & 0o111) != 0 {
+                    return Some(candidate);
                 }
             }
-            #[cfg(not(unix))]
-            {
+        }
+
+        #[cfg(windows)]
+        {
+            let candidate = dir.join(cmd);
+            if candidate.is_file() {
                 return Some(candidate);
+            }
+
+            let pathext = std::env::var_os("PATHEXT")
+                .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+
+            for ext in pathext.to_string_lossy().split(';') {
+                if ext.is_empty() {
+                    continue;
+                }
+                let trimmed = ext.trim();
+                let normalized = if trimmed.starts_with('.') {
+                    trimmed.to_string()
+                } else {
+                    format!(".{trimmed}")
+                };
+                let candidate = dir.join(format!("{cmd}{normalized}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
             }
         }
     }
@@ -533,9 +555,13 @@ mod tests {
 
     #[test]
     fn test_find_command_on_path_finds_known_binary() {
-        // `sh` is universally present on any system that can run tests
-        let result = find_command_on_path("sh");
-        assert!(result.is_some(), "expected to find `sh` on PATH");
+        #[cfg(windows)]
+        let command = "cmd";
+        #[cfg(not(windows))]
+        let command = "sh";
+
+        let result = find_command_on_path(command);
+        assert!(result.is_some(), "expected to find `{command}` on PATH");
         assert!(result.unwrap().is_absolute());
     }
 
