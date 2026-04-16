@@ -138,7 +138,7 @@ mod tests {
         let path = dir.path().join("usage.jsonl");
 
         let row = make_row("session-1", "2026-04-11", "claude-opus-4-6", 1000, 200);
-        append(&path, &[row.clone()]).expect("append");
+        append(&path, std::slice::from_ref(&row)).expect("append");
 
         let rows = read_all(&path).expect("read_all");
         assert_eq!(rows.len(), 1, "one row stored and retrieved");
@@ -220,7 +220,6 @@ mod tests {
         let path = dir.path().join("usage.jsonl");
 
         // Manually write a file with one good and one bad line.
-        use std::io::Write as _;
         let mut f = File::create(&path).expect("create");
         writeln!(f, "{{not valid json}}").expect("write bad line");
         let good = make_row("s1", "2026-04-11", "claude", 100, 20);
