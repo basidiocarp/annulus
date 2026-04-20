@@ -1,4 +1,5 @@
 mod config;
+mod notify;
 mod providers;
 mod status;
 mod statusline;
@@ -32,6 +33,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show and clear canopy notifications
+    Notify {
+        /// Poll for and print unread notifications, then mark them as read
+        #[arg(long)]
+        poll: bool,
+        /// Send system notification (macOS only, opt-in)
+        #[arg(long)]
+        system: bool,
+    },
     /// Validate hooks configuration
     ValidateHooks,
 }
@@ -49,6 +59,7 @@ fn main() {
             }
             Ok(())
         }
+        Command::Notify { poll, system } => notify::handle(poll, system),
         Command::ValidateHooks => validate_hooks::run(),
     };
 

@@ -90,6 +90,13 @@ struct SavingsStat {
     input_tokens: usize,
 }
 
+#[derive(Debug, PartialEq)]
+struct ToolAdoptionStat {
+    tools_used: u32,
+    tools_relevant: u32,
+    score: f32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct StatuslineView {
     context_pct: Option<u8>,
@@ -681,6 +688,10 @@ fn hyphae_db_path() -> PathBuf {
     spore::paths::data_dir("hyphae").join("hyphae.db")
 }
 
+fn canopy_db_path() -> PathBuf {
+    spore::paths::data_dir("canopy").join("canopy.db")
+}
+
 fn hyphae_status() -> HyphaeStatus {
     hyphae_status_at_path(&hyphae_db_path())
 }
@@ -706,6 +717,59 @@ fn hyphae_status_at_path(path: &Path) -> HyphaeStatus {
     } else {
         HyphaeStatus::Stale
     }
+}
+
+fn tool_adoption_stat_at_path(path: &Path) -> Option<ToolAdoptionStat> {
+    if !path.exists() {
+        return None;
+    }
+
+    let conn = Connection::open(path).ok()?;
+    let json_str = conn
+        .query_row(
+            "SELECT score_json FROM tool_adoption_scores ORDER BY rowid DESC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()?
+        ?;
+
+    let v: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+    let tools_used = v.get("tools_used")?.as_u64()? as u32;
+    let tools_relevant = v.get("tools_relevant")?.as_u64()? as u32;
+    let score = v.get("score")?.as_f64()? as f32;
+
+    Some(ToolAdoptionStat {
+        tools_used,
+        tools_relevant,
+        score,
+    })
+}
+
+fn tool_adoption_stat() -> Option<ToolAdoptionStat> {
+    tool_adoption_stat_at_path(&canopy_db_path())
+}
+
+fn canopy_unread_count_at_path(path: &Path) -> Option<u32> {
+    if !path.exists() {
+        return None;
+    }
+
+    let conn = Connection::open(path).ok()?;
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM notifications WHERE seen = 0",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+
+    Some(count as u32)
+}
+
+fn canopy_unread_count() -> Option<u32> {
+    canopy_unread_count_at_path(&canopy_db_path())
 }
 
 /// JSON data for the hyphae segment (path-parameterized for testing).
@@ -736,6 +800,71 @@ fn build_hyphae_segment_at_path(path: &Path) -> JsonSegment {
 /// JSON data for the hyphae segment.
 fn build_hyphae_segment() -> JsonSegment {
     build_hyphae_segment_at_path(&hyphae_db_path())
+}
+
+/// JSON data for the canopy tool adoption segment (path-parameterized for testing).
+fn build_canopy_adoption_segment_at_path(path: &Path) -> JsonSegment {
+    match tool_adoption_stat_at_path(path) {
+        Some(stat) => JsonSegment {
+            name: "canopy-adoption".to_string(),
+            available: true,
+            value: Some(serde_json::json!({
+                "tools_used": stat.tools_used,
+                "tools_relevant": stat.tools_relevant,
+                "score": stat.score
+            })),
+            reason: None,
+        },
+        None => JsonSegment {
+            name: "canopy-adoption".to_string(),
+            available: false,
+            value: None,
+            reason: Some("no tool adoption data".to_string()),
+        },
+    }
+}
+
+/// JSON data for the canopy tool adoption segment.
+fn build_canopy_adoption_segment() -> JsonSegment {
+    build_canopy_adoption_segment_at_path(&canopy_db_path())
+}
+
+/// JSON data for the canopy notifications segment (path-parameterized for testing).
+fn build_canopy_notifications_segment_at_path(path: &Path) -> JsonSegment {
+    if !path.exists() {
+        return JsonSegment {
+            name: "canopy-notifications".to_string(),
+            available: false,
+            value: None,
+            reason: Some(format!("canopy.db not found at {}", path.display())),
+        };
+    }
+
+    match canopy_unread_count_at_path(path) {
+        Some(count) if count > 0 => JsonSegment {
+            name: "canopy-notifications".to_string(),
+            available: true,
+            value: Some(serde_json::json!({ "unread": count })),
+            reason: None,
+        },
+        Some(_) => JsonSegment {
+            name: "canopy-notifications".to_string(),
+            available: false,
+            value: None,
+            reason: Some("no unread canopy notifications".to_string()),
+        },
+        None => JsonSegment {
+            name: "canopy-notifications".to_string(),
+            available: false,
+            value: None,
+            reason: Some(format!("canopy.db not found at {}", path.display())),
+        },
+    }
+}
+
+/// JSON data for the canopy notifications segment.
+fn build_canopy_notifications_segment() -> JsonSegment {
+    build_canopy_notifications_segment_at_path(&canopy_db_path())
 }
 
 /// JSON data for the cortina segment — always unavailable, no data seam yet.
@@ -948,6 +1077,46 @@ impl Segment for CortinaSegment {
     }
 }
 
+struct ToolAdoptionSegment;
+impl Segment for ToolAdoptionSegment {
+    fn name(&self) -> &'static str {
+        "canopy-adoption"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    fn render(&self, _view: &StatuslineView, color: bool) -> Option<String> {
+        let stat = tool_adoption_stat()?;
+        let label = format!("tools:{}/{}", stat.tools_used, stat.tools_relevant);
+        let color_code = if stat.score >= 0.7 {
+            "32" // green
+        } else if stat.score >= 0.4 {
+            "33" // yellow
+        } else {
+            "31" // red
+        };
+        Some(paint(&label, color_code, color))
+    }
+}
+
+struct CanopyNotificationsSegment;
+impl Segment for CanopyNotificationsSegment {
+    fn name(&self) -> &'static str {
+        "canopy-notifications"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    fn render(&self, _view: &StatuslineView, color: bool) -> Option<String> {
+        let count = canopy_unread_count()?;
+        if count == 0 {
+            return None;
+        }
+        let label = format!("canopy:{count} unread");
+        Some(paint(&label, "33", color))
+    }
+}
+
 struct DegradationSegment;
 impl Segment for DegradationSegment {
     fn name(&self) -> &'static str {
@@ -1058,6 +1227,8 @@ fn segments_from_config(config: &StatuslineConfig) -> Vec<Box<dyn Segment>> {
             "workspace" => Some(Box::new(WorkspaceSegment)),
             "context-bar" => Some(Box::new(ContextBarSegment)),
             "hyphae" => Some(Box::new(HyphaeSegment)),
+            "canopy-adoption" => Some(Box::new(ToolAdoptionSegment)),
+            "canopy-notifications" => Some(Box::new(CanopyNotificationsSegment)),
             "cortina" => Some(Box::new(CortinaSegment)),
             _ => None,
         };
@@ -1116,6 +1287,8 @@ fn build_json_payload(view: &StatuslineView, config: &StatuslineConfig) -> JsonP
             "workspace" => build_workspace_segment(view),
             "context-bar" => build_context_bar_segment(view),
             "hyphae" => build_hyphae_segment(),
+            "canopy-adoption" => build_canopy_adoption_segment(),
+            "canopy-notifications" => build_canopy_notifications_segment(),
             "cortina" => build_cortina_segment(),
             _ => continue,
         };
@@ -2424,5 +2597,82 @@ mod tests {
             "model_name should be from a known provider, got '{}'",
             view.model_name,
         );
+    }
+
+    #[test]
+    fn tool_adoption_stat_returns_none_when_db_missing() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let nonexistent = temp.path().join("canopy.db");
+        assert!(tool_adoption_stat_at_path(&nonexistent).is_none());
+    }
+
+    #[test]
+    fn tool_adoption_stat_parses_score_json() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db = temp.path().join("canopy.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "CREATE TABLE tool_adoption_scores (task_id TEXT, score_json TEXT, created_at TEXT)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tool_adoption_scores VALUES ('t1', '{\"score\":0.75,\"tools_used\":3,\"tools_relevant\":4,\"tools_available\":5,\"details\":[]}', '2024-01-01')",
+            [],
+        )
+        .unwrap();
+        let stat = tool_adoption_stat_at_path(&db).unwrap();
+        assert_eq!(stat.tools_used, 3);
+        assert_eq!(stat.tools_relevant, 4);
+        assert!((stat.score - 0.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn tool_adoption_segment_renders_tools_indicator() {
+        let stat = ToolAdoptionStat {
+            tools_used: 3,
+            tools_relevant: 4,
+            score: 0.75,
+        };
+        let label = format!("tools:{}/{}", stat.tools_used, stat.tools_relevant);
+        assert_eq!(label, "tools:3/4");
+    }
+
+    #[test]
+    fn canopy_notifications_returns_none_when_db_missing() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let nonexistent = temp.path().join("canopy.db");
+        assert!(canopy_unread_count_at_path(&nonexistent).is_none());
+    }
+
+    #[test]
+    fn canopy_notifications_counts_unread() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db = temp.path().join("canopy.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "CREATE TABLE notifications (notification_id TEXT, event_type TEXT, task_id TEXT, agent_id TEXT, payload TEXT, seen INTEGER, created_at TEXT)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO notifications VALUES ('n1', 'task_completed', 't1', NULL, '{}', 0, '2024-01-01')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO notifications VALUES ('n2', 'task_completed', 't2', NULL, '{}', 1, '2024-01-02')",
+            [],
+        )
+        .unwrap();
+        let count = canopy_unread_count_at_path(&db).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn canopy_notifications_segment_shows_unread_count() {
+        let count = 3u32;
+        let label = format!("canopy:{count} unread");
+        assert_eq!(label, "canopy:3 unread");
     }
 }
