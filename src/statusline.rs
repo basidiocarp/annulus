@@ -7,6 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::bridge::{bridge_path, read_bridge};
 use crate::config::{StatuslineConfig, load_config};
 use crate::providers;
 
@@ -802,6 +803,42 @@ fn build_hyphae_segment() -> JsonSegment {
     build_hyphae_segment_at_path(&hyphae_db_path())
 }
 
+/// JSON data for the bridge segment (path-parameterized for testing).
+fn build_bridge_segment_at_path(path: &Path) -> JsonSegment {
+    let state = read_bridge(path);
+    if state.entries.is_empty() {
+        return JsonSegment {
+            name: "bridge".to_string(),
+            available: false,
+            value: None,
+            reason: Some("no entries in bridge file".to_string()),
+        };
+    }
+
+    let entries: Vec<Value> = state
+        .entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "key": e.key,
+                "value": e.value,
+            })
+        })
+        .collect();
+
+    JsonSegment {
+        name: "bridge".to_string(),
+        available: true,
+        value: Some(serde_json::json!({ "entries": entries })),
+        reason: None,
+    }
+}
+
+/// JSON data for the bridge segment.
+fn build_bridge_segment() -> JsonSegment {
+    build_bridge_segment_at_path(&bridge_path())
+}
+
 /// JSON data for the canopy tool adoption segment (path-parameterized for testing).
 fn build_canopy_adoption_segment_at_path(path: &Path) -> JsonSegment {
     match tool_adoption_stat_at_path(path) {
@@ -1063,6 +1100,28 @@ impl Segment for HyphaeSegment {
     }
 }
 
+struct BridgeSegment;
+impl Segment for BridgeSegment {
+    fn name(&self) -> &'static str {
+        "bridge"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    fn render(&self, _view: &StatuslineView, color: bool) -> Option<String> {
+        let state = read_bridge(&bridge_path());
+        if state.entries.is_empty() {
+            return None;
+        }
+        let parts: Vec<String> = state
+            .entries
+            .iter()
+            .map(|e| format!("[{}:{}]", e.key, e.value))
+            .collect();
+        Some(paint(&parts.join(" "), "35", color))
+    }
+}
+
 struct CortinaSegment;
 impl Segment for CortinaSegment {
     fn name(&self) -> &'static str {
@@ -1227,6 +1286,7 @@ fn segments_from_config(config: &StatuslineConfig) -> Vec<Box<dyn Segment>> {
             "workspace" => Some(Box::new(WorkspaceSegment)),
             "context-bar" => Some(Box::new(ContextBarSegment)),
             "hyphae" => Some(Box::new(HyphaeSegment)),
+            "bridge" => Some(Box::new(BridgeSegment)),
             "canopy-adoption" => Some(Box::new(ToolAdoptionSegment)),
             "canopy-notifications" => Some(Box::new(CanopyNotificationsSegment)),
             "cortina" => Some(Box::new(CortinaSegment)),
@@ -1287,6 +1347,7 @@ fn build_json_payload(view: &StatuslineView, config: &StatuslineConfig) -> JsonP
             "workspace" => build_workspace_segment(view),
             "context-bar" => build_context_bar_segment(view),
             "hyphae" => build_hyphae_segment(),
+            "bridge" => build_bridge_segment(),
             "canopy-adoption" => build_canopy_adoption_segment(),
             "canopy-notifications" => build_canopy_notifications_segment(),
             "cortina" => build_cortina_segment(),

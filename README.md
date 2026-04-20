@@ -63,6 +63,60 @@ Renders a two-line operator status bar showing context usage, token counts, sess
 
 Reads host config files, checks that every registered hook path exists and points to a valid executable, and reports stale, missing, or broken entries. Output is suitable for both direct use and piped into `stipe doctor`.
 
+### Bridge File
+
+Hooks and external tools can write state to a well-known JSON file that annulus reads and renders in the statusline. Entries support optional TTL (time-to-live), so transient state like focus modes or badges can auto-expire without explicit cleanup.
+
+**File Location**: `~/.config/annulus/bridge.json`
+
+**Schema**:
+```json
+{
+  "entries": [
+    {
+      "key": "mode",
+      "value": "focus",
+      "ttl_secs": 300,
+      "written_at": 1704067200
+    }
+  ]
+}
+```
+
+- `key`: identifier for this state entry (e.g., "mode", "badge")
+- `value`: the state value to render
+- `ttl_secs` (optional): how many seconds this entry should live. Combined with `written_at`, entries older than `written_at + ttl_secs` are automatically filtered.
+- `written_at` (optional): Unix timestamp (seconds) when the entry was written. If absent, the entry never expires. If `ttl_secs` is also absent, staleness check is skipped.
+
+**Enabling the Bridge Segment**: Add `bridge` to your `~/.config/annulus/statusline.toml`:
+```toml
+[[segments]]
+name = "bridge"
+enabled = true
+```
+
+**Example Hook Usage**:
+```bash
+#!/usr/bin/env bash
+# A hook that sets a focus mode, auto-expiring after 5 minutes
+BRIDGE_FILE="$HOME/.config/annulus/bridge.json"
+mkdir -p "$(dirname "$BRIDGE_FILE")"
+
+NOW=$(date +%s)
+cat > "$BRIDGE_FILE" <<EOF
+{
+  "entries": [
+    {
+      "key": "mode",
+      "value": "focus",
+      "ttl_secs": 300,
+      "written_at": $NOW
+    }
+  ]
+}
+EOF
+```
+
 ---
 
 ## Multi-Session Support

@@ -1,3 +1,4 @@
+mod bridge;
 mod config;
 mod notify;
 mod providers;
