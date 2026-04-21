@@ -509,7 +509,15 @@ fn pricing_for_model(display_name: &str) -> Option<Pricing> {
             cache_read_above_threshold: 0.005,
             cache_creation_above_threshold: 0.0,
         })
-    } else if normalized.contains("gpt-5") {
+    } else if normalized == "gpt-5"
+        || (normalized.starts_with("gpt-5-")
+            && !normalized["gpt-5-".len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit()))
+    {
+        // Matches "gpt-5" exactly or "gpt-5-<non-digit-prefix>", but not "gpt-50" or
+        // "gpt-500". More specific gpt-5.x variants are handled in branches above.
         Some(Pricing {
             input_per_million: 1.25,
             output_per_million: 10.00,
@@ -766,7 +774,9 @@ fn canopy_unread_count_at_path(path: &Path) -> Option<u32> {
         )
         .ok()?;
 
-    Some(count as u32)
+    // COUNT(*) is always non-negative; clamp to 0 to guard against any unexpected
+    // negative value before converting to the unsigned return type.
+    Some(u32::try_from(count.max(0)).unwrap_or(u32::MAX))
 }
 
 fn canopy_unread_count() -> Option<u32> {
@@ -1202,7 +1212,12 @@ impl Segment for DegradationSegment {
             match report.tier {
                 DegradationTier::Tier1 => has_tier1 = true,
                 DegradationTier::Tier2 => has_tier2 = true,
-                DegradationTier::Tier3 | _ => {}
+                // Tier3 (optional/informational) does not escalate the indicator.
+                // DegradationTier is #[non_exhaustive]; future variants also default to no
+                // escalation rather than silently falling into an existing tier.
+                #[allow(clippy::match_same_arms)]
+                DegradationTier::Tier3 => {}
+                _ => {}
             }
         }
 
@@ -1972,6 +1987,12 @@ mod tests {
         let codex = pricing_for_model("gpt-5.2-codex").expect("gpt-5.2-codex pricing");
         assert!((codex.input_per_million - 1.75).abs() < f64::EPSILON);
         assert!((codex.output_per_million - 14.0).abs() < f64::EPSILON);
+
+        // Strings like "gpt-50" or "gpt-500" must not match the gpt-5 tier.
+        assert!(
+            pricing_for_model("gpt-50").is_none(),
+            "gpt-50 must not match gpt-5 tier"
+        );
     }
 
     #[test]
@@ -2317,7 +2338,12 @@ mod tests {
                 match report.tier {
                     DegradationTier::Tier1 => has_tier1 = true,
                     DegradationTier::Tier2 => has_tier2 = true,
-                    DegradationTier::Tier3 | _ => {}
+                    // Tier3 (optional/informational) does not escalate the indicator.
+                // DegradationTier is #[non_exhaustive]; future variants also default to no
+                // escalation rather than silently falling into an existing tier.
+                #[allow(clippy::match_same_arms)]
+                DegradationTier::Tier3 => {}
+                _ => {}
                 }
             }
 

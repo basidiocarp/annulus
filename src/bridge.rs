@@ -62,7 +62,7 @@ pub fn read_bridge(path: &std::path::Path) -> BridgeState {
         .filter(|e| {
             // If both written_at and ttl_secs are present, check staleness
             if let (Some(written_at), Some(ttl_secs)) = (e.written_at, e.ttl_secs) {
-                now <= written_at + ttl_secs
+                now <= written_at.saturating_add(ttl_secs)
             } else {
                 // No TTL means entry lives forever
                 true
