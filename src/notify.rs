@@ -2,6 +2,8 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 use std::path::PathBuf;
 
+type NotificationRow = (String, String, Option<String>, Option<String>, String);
+
 fn canopy_db_path() -> Option<PathBuf> {
     let path = spore::paths::data_dir("canopy").join("canopy.db");
     path.exists().then_some(path)
@@ -20,7 +22,7 @@ pub fn handle(poll: bool, system: bool) -> Result<()> {
         "SELECT notification_id, event_type, task_id, agent_id, created_at
          FROM notifications WHERE seen = 0 ORDER BY created_at DESC",
     )?;
-    let rows: Vec<(String, String, Option<String>, Option<String>, String)> = stmt
+    let rows: Vec<NotificationRow> = stmt
         .query_map([], |row| {
             Ok((
                 row.get(0)?,
@@ -58,7 +60,10 @@ pub fn handle(poll: bool, system: bool) -> Result<()> {
 
     if poll {
         // Mark all as read
-        conn.execute("UPDATE notifications SET seen = 1 WHERE seen = 0", params![])?;
+        conn.execute(
+            "UPDATE notifications SET seen = 1 WHERE seen = 0",
+            params![],
+        )?;
         println!("Marked {} notification(s) as read.", rows.len());
     }
 
@@ -111,14 +116,26 @@ mod tests {
         // Verify rows exist
         let conn = Connection::open(&db_path).unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM notifications WHERE seen = 0", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM notifications WHERE seen = 0",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 2);
 
         // Mark as read
-        conn.execute("UPDATE notifications SET seen = 1 WHERE seen = 0", params![]).unwrap();
+        conn.execute(
+            "UPDATE notifications SET seen = 1 WHERE seen = 0",
+            params![],
+        )
+        .unwrap();
         let after: i64 = conn
-            .query_row("SELECT COUNT(*) FROM notifications WHERE seen = 0", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM notifications WHERE seen = 0",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(after, 0);
     }
@@ -130,7 +147,12 @@ mod tests {
         // No panic, no error
         let count: i64 = {
             let conn = Connection::open(dir.path().join("canopy.db")).unwrap();
-            conn.query_row("SELECT COUNT(*) FROM notifications WHERE seen = 0", [], |r| r.get(0)).unwrap()
+            conn.query_row(
+                "SELECT COUNT(*) FROM notifications WHERE seen = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
         };
         assert_eq!(count, 0);
     }

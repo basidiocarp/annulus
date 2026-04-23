@@ -741,12 +741,13 @@ fn tool_adoption_stat_at_path(path: &Path) -> Option<ToolAdoptionStat> {
             |row| row.get::<_, String>(0),
         )
         .optional()
-        .ok()?
-        ?;
+        .ok()??;
 
     let v: serde_json::Value = serde_json::from_str(&json_str).ok()?;
-    let tools_used = v.get("tools_used")?.as_u64()? as u32;
-    let tools_relevant = v.get("tools_relevant")?.as_u64()? as u32;
+    let tools_used = u32::try_from(v.get("tools_used")?.as_u64()?).ok()?;
+    let tools_relevant = u32::try_from(v.get("tools_relevant")?.as_u64()?).ok()?;
+    // Convert f64 to f32 for score display; precision loss is acceptable here.
+    #[allow(clippy::cast_possible_truncation)]
     let score = v.get("score")?.as_f64()? as f32;
 
     Some(ToolAdoptionStat {
@@ -2339,11 +2340,11 @@ mod tests {
                     DegradationTier::Tier1 => has_tier1 = true,
                     DegradationTier::Tier2 => has_tier2 = true,
                     // Tier3 (optional/informational) does not escalate the indicator.
-                // DegradationTier is #[non_exhaustive]; future variants also default to no
-                // escalation rather than silently falling into an existing tier.
-                #[allow(clippy::match_same_arms)]
-                DegradationTier::Tier3 => {}
-                _ => {}
+                    // DegradationTier is #[non_exhaustive]; future variants also default to no
+                    // escalation rather than silently falling into an existing tier.
+                    #[allow(clippy::match_same_arms)]
+                    DegradationTier::Tier3 => {}
+                    _ => {}
                 }
             }
 

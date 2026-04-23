@@ -87,6 +87,8 @@ mod tests {
 
     #[test]
     fn read_bridge_filters_stale_entries() {
+        use std::io::Write;
+
         let mut temp = NamedTempFile::new().unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -97,10 +99,9 @@ mod tests {
         let json = format!(
             r#"{{"entries": [{{"key": "fresh", "value": "yes", "ttl_secs": 300, "written_at": {}}}, {{"key": "stale", "value": "no", "ttl_secs": 10, "written_at": {}}}]}}"#,
             now,
-            now - 100  // 100 seconds ago, TTL is 10 secs, so expired
+            now - 100 // 100 seconds ago, TTL is 10 secs, so expired
         );
 
-        use std::io::Write;
         temp.write_all(json.as_bytes()).unwrap();
         temp.flush().unwrap();
 
@@ -111,12 +112,13 @@ mod tests {
 
     #[test]
     fn read_bridge_returns_all_when_no_ttl() {
+        use std::io::Write;
+
         let mut temp = NamedTempFile::new().unwrap();
 
         // Entries without ttl_secs or written_at are never filtered
         let json = r#"{"entries": [{"key": "permanent", "value": "always_here"}]}"#;
 
-        use std::io::Write;
         temp.write_all(json.as_bytes()).unwrap();
         temp.flush().unwrap();
 
