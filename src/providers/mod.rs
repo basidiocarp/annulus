@@ -137,9 +137,125 @@ fn detect_by_recency() -> Box<dyn TokenProvider> {
     }
 }
 
+/// Derived context window and pace metrics for operator visibility.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[must_use]
+#[allow(dead_code)]
+pub struct ContextMetrics {
+    /// Percentage of context window used (`0.0`–`100.0`), clamped.
+    pub window_pct: f32,
+    /// Token consumption rate in tokens per hour.
+    pub pace_tokens_per_hr: f64,
+    /// True when `window_pct >= 80.0`.
+    pub at_warning: bool,
+}
+
+/// Compute what percentage of the context window is used.
+///
+/// `context_limit` is the model's total context window in tokens.
+/// Returns `0.0` when limit is zero, clamped to `100.0` max.
+#[must_use]
+#[allow(
+    dead_code,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation
+)]
+pub fn context_percent(usage: &TokenUsage, context_limit: u64) -> f32 {
+    if context_limit == 0 {
+        return 0.0;
+    }
+    let used = f64::from(usage.prompt_tokens) + f64::from(usage.completion_tokens);
+    ((used / context_limit as f64) * 100.0).min(100.0) as f32
+}
+
+/// Compute token consumption rate in tokens per hour.
+///
+/// `elapsed_minutes` is the session elapsed time. Returns `0.0` when elapsed is zero or negative.
+#[must_use]
+#[allow(dead_code)]
+pub fn pace_delta(usage: &TokenUsage, elapsed_minutes: f64) -> f64 {
+    if elapsed_minutes <= 0.0 {
+        return 0.0;
+    }
+    let total = f64::from(usage.prompt_tokens) + f64::from(usage.completion_tokens);
+    total / elapsed_minutes * 60.0
+}
+
+/// Build `ContextMetrics` from a `TokenUsage`, context limit, and elapsed session time.
+#[allow(dead_code)]
+pub fn context_metrics(
+    usage: &TokenUsage,
+    context_limit: u64,
+    elapsed_minutes: f64,
+) -> ContextMetrics {
+    let window_pct = context_percent(usage, context_limit);
+    let pace_tokens_per_hr = pace_delta(usage, elapsed_minutes);
+    ContextMetrics {
+        window_pct,
+        pace_tokens_per_hr,
+        at_warning: window_pct >= 80.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_usage(prompt: u32, completion: u32) -> TokenUsage {
+        TokenUsage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        }
+    }
+
+    #[test]
+    fn context_percent_zero_limit() {
+        let u = make_usage(1000, 100);
+        assert!((context_percent(&u, 0) - 0.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn context_percent_half() {
+        let u = make_usage(50_000, 50_000);
+        let pct = context_percent(&u, 200_000);
+        assert!((pct - 50.0).abs() < 0.1, "expected ~50%, got {pct}");
+    }
+
+    #[test]
+    fn context_percent_clamped_at_100() {
+        let u = make_usage(200_000, 100_000);
+        assert!((context_percent(&u, 200_000) - 100.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn pace_delta_zero_elapsed() {
+        let u = make_usage(10_000, 1_000);
+        assert!((pace_delta(&u, 0.0) - 0.0).abs() < 0.1);
+        assert!((pace_delta(&u, -1.0) - 0.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn pace_delta_one_hour() {
+        let u = make_usage(60_000, 0);
+        let rate = pace_delta(&u, 60.0);
+        assert!(
+            (rate - 60_000.0).abs() < 1.0,
+            "expected 60000 tok/hr, got {rate}"
+        );
+    }
+
+    #[test]
+    fn at_warning_threshold() {
+        let u = make_usage(160_000, 0); // 80% of 200_000
+        let m = context_metrics(&u, 200_000, 30.0);
+        assert!(m.at_warning, "80% should trigger warning");
+
+        let u2 = make_usage(159_999, 0);
+        let m2 = context_metrics(&u2, 200_000, 30.0);
+        assert!(!m2.at_warning, "below 80% should not trigger warning");
+    }
 
     #[test]
     fn detect_provider_returns_a_provider_by_default() {
