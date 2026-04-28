@@ -59,6 +59,18 @@ annulus validate-hooks
 
 Renders a two-line operator status bar showing context usage, token counts, session cost, model name, git branch, mycelium savings, and (when available) hyphae health and canopy task state. Segment-based and discovery-driven — each data source is an independent segment that only renders if the tool is available.
 
+### Notify
+
+Polls Canopy for pending operator notifications and prints them. `annulus notify --poll` performs notification acknowledgement — it marks seen rows in the Canopy-owned notifications table so they are not repeated on the next poll. This is the only write surface in annulus; all other subcommands are read-only.
+
+```bash
+# Check for pending notifications (one-shot)
+annulus notify
+
+# Poll and acknowledge new notifications
+annulus notify --poll
+```
+
 ### Hook Path Validator
 
 Reads host config files, checks that every registered hook path exists and points to a valid executable, and reports stale, missing, or broken entries. Output is suitable for both direct use and piped into `stipe doctor`.
