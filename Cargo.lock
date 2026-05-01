@@ -690,9 +690,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.11"
+version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20a6af516fea4b20eccceaf166e8aa666ac996208e8a644ce3ef5aa783bc7cd4"
+checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -787,7 +787,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "spore"
 version = "0.4.11"
-source = "git+https://github.com/basidiocarp/spore?tag=v0.4.11#0bc2e878010e75e30e26fa517d747e97d59628b0"
+source = "git+https://github.com/basidiocarp/spore?rev=0bc2e878010e75e30e26fa517d747e97d59628b0#0bc2e878010e75e30e26fa517d747e97d59628b0"
 dependencies = [
  "anyhow",
  "chrono",
