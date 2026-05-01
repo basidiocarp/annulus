@@ -2627,6 +2627,7 @@ mod tests {
         assert_eq!(view.context_pct, Some(90));
     }
 
+    #[cfg(unix)]
     #[test]
     fn session_path_json_infers_gemini_before_config_provider() {
         let input = StatuslineInput {
@@ -2642,6 +2643,7 @@ mod tests {
         assert_eq!(view.model_name, "gemini");
     }
 
+    #[cfg(unix)]
     #[test]
     fn session_path_jsonl_infers_codex_before_config_provider() {
         let input = StatuslineInput {
