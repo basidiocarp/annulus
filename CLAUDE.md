@@ -108,7 +108,9 @@ src/
 
 ### Outbound (this project sends)
 
-Annulus does not emit structured payloads to sibling tools in the current scaffold.
+| Target | Protocol | What |
+|--------|----------|------|
+| Cap, operator scripts | JSON (septa schema) | Statusline segments via `annulus statusline` (schema: `annulus-statusline-v1.schema.json`) |
 
 ### Inbound (this project reads)
 

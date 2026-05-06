@@ -47,6 +47,12 @@ cargo install --path .
 # Render operator statusline
 annulus statusline
 
+# Check ecosystem availability
+annulus status
+
+# Show notifications
+annulus notify
+
 # Validate hook paths
 annulus validate-hooks
 ```
@@ -59,6 +65,18 @@ annulus validate-hooks
 
 Renders a two-line operator status bar showing context usage, token counts, session cost, model name, git branch, mycelium savings, and (when available) hyphae health and canopy task state. Segment-based and discovery-driven — each data source is an independent segment that only renders if the tool is available.
 
+### Status
+
+Probes all ecosystem tools (Canopy, Hyphae, Mycelium, Cortina, and others) and reports their availability, tier level, and any degraded capabilities. Useful for diagnosing ecosystem health and verifying that all dependencies are installed and reachable.
+
+```bash
+# Check ecosystem availability (human-readable table)
+annulus status
+
+# Get ecosystem status as JSON
+annulus status --json
+```
+
 ### Notify
 
 Polls Canopy for pending operator notifications and prints them. `annulus notify --poll` performs notification acknowledgement — it marks seen rows in the Canopy-owned notifications table so they are not repeated on the next poll. This is the only write surface in annulus; all other subcommands are read-only.
@@ -69,6 +87,9 @@ annulus notify
 
 # Poll and acknowledge new notifications
 annulus notify --poll
+
+# Show notifications and send macOS system notification
+annulus notify --system
 ```
 
 ### Hook Path Validator
@@ -145,14 +166,26 @@ See [docs/multi-session.md](docs/multi-session.md) for the full stdin schema, pr
 
 ```text
 annulus (single binary)
-├── src/main.rs            CLI entry, subcommand dispatch
-├── src/statusline.rs      segment rendering and composition
-└── src/validate_hooks.rs  hook path validation
+├── src/main.rs              CLI entry point and subcommand dispatch
+├── src/bridge.rs            Bridge file reader for cross-tool state sharing
+├── src/config.rs            Statusline configuration file loading (TOML)
+├── src/notify.rs            Canopy notification polling and acknowledgement
+├── src/status.rs            Ecosystem tool availability probing
+├── src/statusline.rs        Segment rendering and composition logic
+├── src/validate_hooks.rs    Hook path validation
+└── src/providers/
+    ├── mod.rs               TokenProvider trait and auto-detection
+    ├── claude.rs            Claude NDJSON transcript reader
+    ├── codex.rs             Codex NDJSON session reader
+    └── gemini.rs            Gemini JSON session reader
 ```
 
+**Commands**:
 ```text
 annulus statusline       render operator status bar
-annulus validate-hooks   check hook path health
+annulus status           check ecosystem tool availability
+annulus notify           check and acknowledge canopy notifications
+annulus validate-hooks   validate hook path configuration
 ```
 
 ---

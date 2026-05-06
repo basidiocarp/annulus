@@ -22,9 +22,10 @@ dependencies = [
 
 [[package]]
 name = "annulus"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "dirs",
  "rusqlite",

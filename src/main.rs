@@ -1,5 +1,6 @@
 mod bridge;
 mod config;
+mod config_export;
 mod notify;
 mod providers;
 mod status;
@@ -43,8 +44,19 @@ enum Command {
         #[arg(long)]
         system: bool,
     },
+    /// Manage configuration
+    Config {
+        #[command(subcommand)]
+        subcommand: ConfigCommand,
+    },
     /// Validate hooks configuration
     ValidateHooks,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Export resolved configuration as resolved-status-customization-v1 JSON
+    Export,
 }
 
 fn main() {
@@ -61,6 +73,9 @@ fn main() {
             Ok(())
         }
         Command::Notify { poll, system } => notify::handle(poll, system),
+        Command::Config { subcommand } => match subcommand {
+            ConfigCommand::Export => config_export::handle_config_export(),
+        },
         Command::ValidateHooks => validate_hooks::run(),
     };
 
