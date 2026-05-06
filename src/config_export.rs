@@ -29,9 +29,7 @@ struct ConfigExport {
     metadata: Metadata,
 }
 
-pub fn handle_config_export() -> Result<()> {
-    let config = load_config();
-
+fn build_export(config: &crate::config::StatuslineConfig) -> ConfigExport {
     let segments = config
         .segments
         .iter()
@@ -41,7 +39,7 @@ pub fn handle_config_export() -> Result<()> {
         })
         .collect();
 
-    let export = ConfigExport {
+    ConfigExport {
         schema_version: "1.0".to_string(),
         segments,
         theme: Theme {
@@ -52,11 +50,14 @@ pub fn handle_config_export() -> Result<()> {
             created_at: chrono::Utc::now().to_rfc3339(),
             version: "1.0".to_string(),
         },
-    };
+    }
+}
 
+pub fn handle_config_export() -> Result<()> {
+    let config = load_config();
+    let export = build_export(&config);
     let json = serde_json::to_string_pretty(&export)?;
     println!("{json}");
-
     Ok(())
 }
 
@@ -66,85 +67,40 @@ mod tests {
     use crate::config::StatuslineConfig;
 
     #[test]
-    fn test_export_default_config() {
+    fn export_default_config_contains_expected_fields() {
         let config = StatuslineConfig::default();
+        let export = build_export(&config);
 
-        let segments: Vec<ExportedSegment> = config
-            .segments
-            .iter()
-            .map(|entry| ExportedSegment {
-                id: entry.name.clone(),
-                enabled: entry.enabled,
-            })
-            .collect();
-
-        let export = ConfigExport {
-            schema_version: "1.0".to_string(),
-            segments,
-            theme: Theme {
-                color_mode: "auto".to_string(),
-                separator: " | ".to_string(),
-            },
-            metadata: Metadata {
-                created_at: "2026-05-06T00:00:00Z".to_string(),
-                version: "1.0".to_string(),
-            },
-        };
-
-        let json = serde_json::to_string_pretty(&export).unwrap();
-        assert!(json.contains("\"schema_version\": \"1.0\""));
-        assert!(json.contains("\"id\": \"context\""));
-        assert!(json.contains("\"enabled\": true"));
-        assert!(json.contains("\"color_mode\": \"auto\""));
-        assert!(json.contains("\"separator\": \" | \""));
+        assert_eq!(export.schema_version, "1.0");
+        assert!(export.segments.iter().any(|s| s.id == "context"));
+        assert!(export.segments.iter().all(|s| s.enabled));
+        assert_eq!(export.theme.color_mode, "auto");
+        assert_eq!(export.theme.separator, " | ");
     }
 
     #[test]
-    fn test_export_segments_match_config() {
+    fn export_preserves_disabled_segment_by_name() {
         let mut config = StatuslineConfig::default();
-        // Disable one segment
+        let first_name = config.segments.first().map(|s| s.name.clone()).unwrap();
         if let Some(first) = config.segments.first_mut() {
             first.enabled = false;
         }
 
-        let segments: Vec<ExportedSegment> = config
-            .segments
-            .iter()
-            .map(|entry| ExportedSegment {
-                id: entry.name.clone(),
-                enabled: entry.enabled,
-            })
-            .collect();
+        let export = build_export(&config);
 
-        assert_eq!(segments.len(), config.segments.len());
-        assert!(!segments[0].enabled);
-        assert!(segments[1].enabled);
+        assert_eq!(export.segments.len(), config.segments.len());
+        let first_segment = export.segments.iter().find(|s| s.id == first_name).unwrap();
+        assert!(!first_segment.enabled);
+        // All other segments should still be enabled
+        for seg in export.segments.iter().filter(|s| s.id != first_name) {
+            assert!(seg.enabled, "segment '{}' should be enabled", seg.id);
+        }
     }
 
     #[test]
-    fn test_export_schema_version() {
+    fn export_schema_version_is_stable() {
         let config = StatuslineConfig::default();
-        let segments = config
-            .segments
-            .iter()
-            .map(|entry| ExportedSegment {
-                id: entry.name.clone(),
-                enabled: entry.enabled,
-            })
-            .collect();
-
-        let export = ConfigExport {
-            schema_version: "1.0".to_string(),
-            segments,
-            theme: Theme {
-                color_mode: "auto".to_string(),
-                separator: " | ".to_string(),
-            },
-            metadata: Metadata {
-                created_at: "2026-05-06T00:00:00Z".to_string(),
-                version: "1.0".to_string(),
-            },
-        };
+        let export = build_export(&config);
 
         assert_eq!(export.schema_version, "1.0");
         assert_eq!(export.metadata.version, "1.0");
