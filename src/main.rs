@@ -28,6 +28,9 @@ enum Command {
         /// Output JSON instead of terminal statusline
         #[arg(long)]
         json: bool,
+        /// Render once and exit (skip polling/refresh loops)
+        #[arg(long)]
+        once: bool,
     },
     /// Show ecosystem availability status
     Status {
@@ -63,7 +66,7 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Command::Statusline { no_color, json } => statusline::handle_stdin(json, no_color),
+        Command::Statusline { no_color, json, once } => statusline::handle_stdin(json, no_color, once),
         Command::Status { json } => {
             if json {
                 println!("{}", status::status_json());

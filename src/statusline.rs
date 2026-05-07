@@ -130,7 +130,13 @@ struct JsonSegment {
     reason: Option<String>,
 }
 
-pub fn handle_stdin(json: bool, no_color: bool) -> Result<()> {
+pub fn handle_stdin(json: bool, no_color: bool, once: bool) -> Result<()> {
+    // `once` is accepted for CI/script compatibility. This function always renders
+    // once and returns — there is no polling loop — so the flag has no effect on
+    // behavior. It exists so callers can pass `--once` without breakage when a
+    // future polling mode is added.
+    let _ = once;
+
     let stdin = io::stdin();
     let input = if stdin.is_terminal() {
         StatuslineInput::default()
@@ -693,12 +699,40 @@ enum HyphaeStatus {
     Unavailable,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct HeartbeatData {
+    status: String,
+    current_task: Option<String>,
+    consecutive_failures: u32,
+}
+
+#[derive(Debug, PartialEq)]
+enum HeartbeatStatus {
+    /// Heartbeat file exists and is recent.
+    Fresh(HeartbeatData),
+    /// Heartbeat file exists but is older than 90 seconds.
+    Stale,
+    /// Heartbeat file does not exist at the expected path.
+    Unavailable,
+}
+
 fn hyphae_db_path() -> PathBuf {
     spore::paths::data_dir("hyphae").join("hyphae.db")
 }
 
 fn canopy_db_path() -> PathBuf {
     spore::paths::data_dir("canopy").join("canopy.db")
+}
+
+fn heartbeat_path() -> PathBuf {
+    std::env::var("CANOPY_HEARTBEAT_PATH").map_or_else(
+        |_| {
+            spore::paths::data_dir("basidiocarp")
+                .join("canopy")
+                .join("heartbeat.json")
+        },
+        PathBuf::from,
+    )
 }
 
 fn hyphae_status() -> HyphaeStatus {
@@ -725,6 +759,59 @@ fn hyphae_status_at_path(path: &Path) -> HyphaeStatus {
         HyphaeStatus::Active { db_bytes }
     } else {
         HyphaeStatus::Stale
+    }
+}
+
+fn heartbeat_status_at_path(path: &Path) -> HeartbeatStatus {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return HeartbeatStatus::Unavailable;
+    };
+
+    // Check modification time: stale if not touched within 90 seconds.
+    let is_recent = metadata
+        .modified()
+        .ok()
+        .and_then(|mtime| mtime.elapsed().ok())
+        .is_some_and(|elapsed| elapsed.as_secs() < 90);
+
+    if !is_recent {
+        return HeartbeatStatus::Stale;
+    }
+
+    // Try to parse the JSON file
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return HeartbeatStatus::Unavailable;
+    };
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return HeartbeatStatus::Unavailable;
+    };
+
+    let status = value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(std::string::ToString::to_string);
+
+    let current_task = value
+        .get("current_task")
+        .and_then(|v| v.as_str())
+        .map(std::string::ToString::to_string);
+
+    let consecutive_failures = value
+        .get("consecutive_failures")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+
+    match status {
+        Some(s) => HeartbeatStatus::Fresh(HeartbeatData {
+            status: s,
+            current_task,
+            // Consecutive failures are written by cortina and realistically
+            // never exceed u32::MAX; truncation is intentional here.
+            #[allow(clippy::cast_possible_truncation)]
+            consecutive_failures: consecutive_failures as u32,
+        }),
+        None => HeartbeatStatus::Unavailable,
     }
 }
 
@@ -925,6 +1012,61 @@ fn build_cortina_segment() -> JsonSegment {
     }
 }
 
+/// JSON data for the heartbeat segment (path-parameterized for testing).
+fn build_heartbeat_segment_at_path(path: &Path) -> JsonSegment {
+    match heartbeat_status_at_path(path) {
+        HeartbeatStatus::Fresh(data) => {
+            let text = match data.status.as_str() {
+                "running" if data.current_task.is_some() => {
+                    let task = data.current_task.as_ref().unwrap();
+                    let truncated = if task.len() > 20 {
+                        format!("{}...", &task[..20])
+                    } else {
+                        task.clone()
+                    };
+                    format!("▶ {truncated}")
+                }
+                "running" => "▶ running".to_string(),
+                "waiting" => "⏸ waiting".to_string(),
+                "idle" => "● idle".to_string(),
+                "error" if data.consecutive_failures > 0 => {
+                    format!("✗ error ({})", data.consecutive_failures)
+                }
+                "error" => "✗ error".to_string(),
+                _ => format!("? {}", data.status),
+            };
+            JsonSegment {
+                name: "heartbeat".to_string(),
+                available: true,
+                value: Some(serde_json::json!({
+                    "text": text,
+                    "status": data.status,
+                    "current_task": data.current_task,
+                    "consecutive_failures": data.consecutive_failures,
+                })),
+                reason: None,
+            }
+        }
+        HeartbeatStatus::Stale => JsonSegment {
+            name: "heartbeat".to_string(),
+            available: true,
+            value: Some(serde_json::json!({ "text": "⏱ stale" })),
+            reason: Some("heartbeat.json has not been updated within 90 seconds".to_string()),
+        },
+        HeartbeatStatus::Unavailable => JsonSegment {
+            name: "heartbeat".to_string(),
+            available: false,
+            value: None,
+            reason: Some(format!("heartbeat.json not found at {}", path.display())),
+        },
+    }
+}
+
+/// JSON data for the heartbeat segment.
+fn build_heartbeat_segment() -> JsonSegment {
+    build_heartbeat_segment_at_path(&heartbeat_path())
+}
+
 trait Segment {
     #[allow(dead_code)]
     fn name(&self) -> &'static str;
@@ -1107,6 +1249,49 @@ impl Segment for HyphaeSegment {
             HyphaeStatus::Active { .. } => Some(paint("hy: active", "2", color)),
             HyphaeStatus::Stale => Some(paint("hy: stale", "2", color)),
             HyphaeStatus::Unavailable => None,
+        }
+    }
+}
+
+struct HeartbeatSegment;
+impl Segment for HeartbeatSegment {
+    fn name(&self) -> &'static str {
+        "heartbeat"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    fn render(&self, _view: &StatuslineView, color: bool) -> Option<String> {
+        match heartbeat_status_at_path(&heartbeat_path()) {
+            HeartbeatStatus::Fresh(data) => {
+                let (text, color_code) = match data.status.as_str() {
+                    "running" if data.current_task.is_some() => {
+                        let task = data.current_task.as_ref().unwrap();
+                        let truncated = if task.len() > 20 {
+                            format!("{}...", &task[..20])
+                        } else {
+                            task.clone()
+                        };
+                        (format!("▶ {truncated}"), "32")
+                    }
+                    "running" => ("▶ running".to_string(), "32"),
+                    "waiting" => ("⏸ waiting".to_string(), "33"),
+                    "idle" => ("● idle".to_string(), "2"),
+                    "error" if data.consecutive_failures > 0 => {
+                        (
+                            format!("✗ error ({})", data.consecutive_failures),
+                            "31",
+                        )
+                    }
+                    "error" => ("✗ error".to_string(), "31"),
+                    _ => (format!("? {}", data.status), "2"),
+                };
+                Some(paint(&format!("agent: {text}"), color_code, color))
+            }
+            HeartbeatStatus::Stale => {
+                Some(paint("agent: ⏱ stale", "33", color))
+            }
+            HeartbeatStatus::Unavailable => None,
         }
     }
 }
@@ -1302,6 +1487,7 @@ fn segments_from_config(config: &StatuslineConfig) -> Vec<Box<dyn Segment>> {
             "workspace" => Some(Box::new(WorkspaceSegment)),
             "context-bar" => Some(Box::new(ContextBarSegment)),
             "hyphae" => Some(Box::new(HyphaeSegment)),
+            "heartbeat" => Some(Box::new(HeartbeatSegment)),
             "bridge" => Some(Box::new(BridgeSegment)),
             "canopy-adoption" => Some(Box::new(ToolAdoptionSegment)),
             "canopy-notifications" => Some(Box::new(CanopyNotificationsSegment)),
@@ -1363,6 +1549,7 @@ fn build_json_payload(view: &StatuslineView, config: &StatuslineConfig) -> JsonP
             "workspace" => build_workspace_segment(view),
             "context-bar" => build_context_bar_segment(view),
             "hyphae" => build_hyphae_segment(),
+            "heartbeat" => build_heartbeat_segment(),
             "bridge" => build_bridge_segment(),
             "canopy-adoption" => build_canopy_adoption_segment(),
             "canopy-notifications" => build_canopy_notifications_segment(),
@@ -2764,5 +2951,216 @@ mod tests {
         let count = 3u32;
         let label = format!("canopy:{count} unread");
         assert_eq!(label, "canopy:3 unread");
+    }
+
+    #[test]
+    fn heartbeat_status_unavailable_when_file_missing() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let heartbeat_path = temp_dir.path().join("heartbeat.json");
+
+        let status = heartbeat_status_at_path(&heartbeat_path);
+        assert_eq!(status, HeartbeatStatus::Unavailable);
+    }
+
+    #[test]
+    fn heartbeat_status_fresh_when_file_just_written() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let heartbeat_path = temp_dir.path().join("heartbeat.json");
+        fs::write(
+            &heartbeat_path,
+            r#"{"status":"running","current_task":null,"consecutive_failures":0}"#,
+        )
+        .unwrap();
+
+        let status = heartbeat_status_at_path(&heartbeat_path);
+        assert!(matches!(status, HeartbeatStatus::Fresh(_)));
+    }
+
+    #[test]
+    fn heartbeat_status_stale_when_file_older_than_90_seconds() {
+        use std::time::{Duration, SystemTime};
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let heartbeat_path = temp_dir.path().join("heartbeat.json");
+        fs::write(
+            &heartbeat_path,
+            r#"{"status":"running","current_task":null,"consecutive_failures":0}"#,
+        )
+        .unwrap();
+
+        // Backdate the file's mtime to 100 seconds ago so the stale threshold fires.
+        let past_time = filetime::FileTime::from_system_time(
+            SystemTime::now() - Duration::from_secs(100),
+        );
+        filetime::set_file_mtime(&heartbeat_path, past_time).unwrap();
+
+        let status = heartbeat_status_at_path(&heartbeat_path);
+        assert_eq!(status, HeartbeatStatus::Stale);
+    }
+
+    #[test]
+    fn heartbeat_segment_renders_running_with_task() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let heartbeat_path = temp_dir.path().join("heartbeat.json");
+        fs::write(
+            &heartbeat_path,
+            r#"{"status":"running","current_task":"implement feature","consecutive_failures":0}"#,
+        )
+        .unwrap();
+
+        let segment = build_heartbeat_segment_at_path(&heartbeat_path);
+        assert!(segment.available);
+        let value = segment.value.unwrap();
+        assert_eq!(
+            value.get("status").and_then(serde_json::Value::as_str),
+            Some("running")
+        );
+        assert_eq!(
+            value.get("text").and_then(serde_json::Value::as_str),
+            Some("▶ implement feature")
+        );
+    }
+
+    #[test]
+    fn heartbeat_segment_truncates_long_task_names() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let heartbeat_path = temp_dir.path().join("heartbeat.json");
+        let long_task = "a".repeat(30);
+        fs::write(
+            &heartbeat_path,
+            format!(r#"{{"status":"running","current_task":"{long_task}","consecutive_failures":0}}"#),
+        )
+        .unwrap();
+
+        let segment = build_heartbeat_segment_at_path(&heartbeat_path);
+        assert!(segment.available);
+        let value = segment.value.unwrap();
+        let text = value.get("text").and_then(serde_json::Value::as_str).unwrap();
+        assert!(text.contains(".."));
+        assert!(text.len() < 35); // "▶ " + 20 chars + ".."
+    }
+
+    #[test]
+    fn heartbeat_segment_renders_running_without_task() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let heartbeat_path = temp_dir.path().join("heartbeat.json");
+        fs::write(
+            &heartbeat_path,
+            r#"{"status":"running","current_task":null,"consecutive_failures":0}"#,
+        )
+        .unwrap();
+
+        let segment = build_heartbeat_segment_at_path(&heartbeat_path);
+        assert!(segment.available);
+        let value = segment.value.unwrap();
+        assert_eq!(
+            value.get("text").and_then(serde_json::Value::as_str),
+            Some("▶ running")
+        );
+    }
+
+    #[test]
+    fn heartbeat_segment_renders_waiting() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let heartbeat_path = temp_dir.path().join("heartbeat.json");
+        fs::write(
+            &heartbeat_path,
+            r#"{"status":"waiting","current_task":null,"consecutive_failures":0}"#,
+        )
+        .unwrap();
+
+        let segment = build_heartbeat_segment_at_path(&heartbeat_path);
+        assert!(segment.available);
+        let value = segment.value.unwrap();
+        assert_eq!(
+            value.get("text").and_then(serde_json::Value::as_str),
+            Some("⏸ waiting")
+        );
+    }
+
+    #[test]
+    fn heartbeat_segment_renders_idle() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let heartbeat_path = temp_dir.path().join("heartbeat.json");
+        fs::write(
+            &heartbeat_path,
+            r#"{"status":"idle","current_task":null,"consecutive_failures":0}"#,
+        )
+        .unwrap();
+
+        let segment = build_heartbeat_segment_at_path(&heartbeat_path);
+        assert!(segment.available);
+        let value = segment.value.unwrap();
+        assert_eq!(
+            value.get("text").and_then(serde_json::Value::as_str),
+            Some("● idle")
+        );
+    }
+
+    #[test]
+    fn heartbeat_segment_renders_error_with_failures() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let heartbeat_path = temp_dir.path().join("heartbeat.json");
+        fs::write(
+            &heartbeat_path,
+            r#"{"status":"error","current_task":null,"consecutive_failures":3}"#,
+        )
+        .unwrap();
+
+        let segment = build_heartbeat_segment_at_path(&heartbeat_path);
+        assert!(segment.available);
+        let value = segment.value.unwrap();
+        assert_eq!(
+            value.get("text").and_then(serde_json::Value::as_str),
+            Some("✗ error (3)")
+        );
+        assert_eq!(
+            value.get("consecutive_failures").and_then(serde_json::Value::as_u64),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn heartbeat_segment_renders_error_without_failures() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let heartbeat_path = temp_dir.path().join("heartbeat.json");
+        fs::write(
+            &heartbeat_path,
+            r#"{"status":"error","current_task":null,"consecutive_failures":0}"#,
+        )
+        .unwrap();
+
+        let segment = build_heartbeat_segment_at_path(&heartbeat_path);
+        assert!(segment.available);
+        let value = segment.value.unwrap();
+        assert_eq!(
+            value.get("text").and_then(serde_json::Value::as_str),
+            Some("✗ error")
+        );
+    }
+
+    #[test]
+    fn heartbeat_segment_unavailable_when_json_invalid() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let heartbeat_path = temp_dir.path().join("heartbeat.json");
+        fs::write(&heartbeat_path, "not valid json").unwrap();
+
+        let segment = build_heartbeat_segment_at_path(&heartbeat_path);
+        assert!(!segment.available);
+        assert!(segment.reason.is_some());
+    }
+
+    #[test]
+    fn heartbeat_segment_unavailable_when_status_missing() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let heartbeat_path = temp_dir.path().join("heartbeat.json");
+        fs::write(
+            &heartbeat_path,
+            r#"{"current_task":"test","consecutive_failures":0}"#,
+        )
+        .unwrap();
+
+        let segment = build_heartbeat_segment_at_path(&heartbeat_path);
+        assert!(!segment.available);
     }
 }

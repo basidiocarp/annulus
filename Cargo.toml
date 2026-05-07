@@ -32,6 +32,7 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 rusqlite = { version = "0.39" }
 
 [dev-dependencies]
+filetime = "0.2"
 tempfile = "3"
 
 [profile.release]
