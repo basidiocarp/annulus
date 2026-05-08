@@ -66,7 +66,11 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Command::Statusline { no_color, json, once } => statusline::handle_stdin(json, no_color, once),
+        Command::Statusline {
+            no_color,
+            json,
+            once,
+        } => statusline::handle_stdin(json, no_color, once),
         Command::Status { json } => {
             if json {
                 println!("{}", status::status_json());

@@ -1278,19 +1278,14 @@ impl Segment for HeartbeatSegment {
                     "waiting" => ("⏸ waiting".to_string(), "33"),
                     "idle" => ("● idle".to_string(), "2"),
                     "error" if data.consecutive_failures > 0 => {
-                        (
-                            format!("✗ error ({})", data.consecutive_failures),
-                            "31",
-                        )
+                        (format!("✗ error ({})", data.consecutive_failures), "31")
                     }
                     "error" => ("✗ error".to_string(), "31"),
                     _ => (format!("? {}", data.status), "2"),
                 };
                 Some(paint(&format!("agent: {text}"), color_code, color))
             }
-            HeartbeatStatus::Stale => {
-                Some(paint("agent: ⏱ stale", "33", color))
-            }
+            HeartbeatStatus::Stale => Some(paint("agent: ⏱ stale", "33", color)),
             HeartbeatStatus::Unavailable => None,
         }
     }
@@ -2989,9 +2984,8 @@ mod tests {
         .unwrap();
 
         // Backdate the file's mtime to 100 seconds ago so the stale threshold fires.
-        let past_time = filetime::FileTime::from_system_time(
-            SystemTime::now() - Duration::from_secs(100),
-        );
+        let past_time =
+            filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(100));
         filetime::set_file_mtime(&heartbeat_path, past_time).unwrap();
 
         let status = heartbeat_status_at_path(&heartbeat_path);
@@ -3028,14 +3022,19 @@ mod tests {
         let long_task = "a".repeat(30);
         fs::write(
             &heartbeat_path,
-            format!(r#"{{"status":"running","current_task":"{long_task}","consecutive_failures":0}}"#),
+            format!(
+                r#"{{"status":"running","current_task":"{long_task}","consecutive_failures":0}}"#
+            ),
         )
         .unwrap();
 
         let segment = build_heartbeat_segment_at_path(&heartbeat_path);
         assert!(segment.available);
         let value = segment.value.unwrap();
-        let text = value.get("text").and_then(serde_json::Value::as_str).unwrap();
+        let text = value
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
         assert!(text.contains(".."));
         assert!(text.len() < 35); // "▶ " + 20 chars + ".."
     }
@@ -3115,7 +3114,9 @@ mod tests {
             Some("✗ error (3)")
         );
         assert_eq!(
-            value.get("consecutive_failures").and_then(serde_json::Value::as_u64),
+            value
+                .get("consecutive_failures")
+                .and_then(serde_json::Value::as_u64),
             Some(3)
         );
     }
