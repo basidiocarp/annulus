@@ -23,7 +23,7 @@ dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
-spore = { git = "https://github.com/basidiocarp/spore", tag = "v0.5.0" }
+spore = { git = "https://github.com/basidiocarp/spore", tag = "v0.6.0" }
 
 [target.'cfg(any(windows, target_env = "musl"))'.dependencies]
 rusqlite = { version = "0.39", features = ["bundled"] }
