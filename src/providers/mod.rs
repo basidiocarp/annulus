@@ -155,10 +155,7 @@ pub struct ContextMetrics {
 /// `context_limit` is the model's total context window in tokens.
 /// Returns `0.0` when limit is zero, clamped to `100.0` max.
 #[must_use]
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation
-)]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 pub fn context_percent(usage: &TokenUsage, context_limit: u64) -> f32 {
     if context_limit == 0 {
         return 0.0;

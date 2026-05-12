@@ -371,23 +371,21 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
 
     // Compute context metrics from cumulative usage and context limit.
     // Uses the full cumulative usage to give operators visibility into total session load.
-    let context_metrics = usage
-        .filter(|u| u.has_data())
-        .map(|u| {
-            let window_pct = providers::context_percent(
-                &providers::TokenUsage {
-                    prompt_tokens: (u.input_tokens as u32),
-                    completion_tokens: (u.output_tokens as u32),
-                    cache_read_tokens: (u.cache_read_input_tokens as u32),
-                    cache_creation_tokens: (u.cache_creation_input_tokens as u32),
-                },
-                context_limit as u64,
-            );
-            ContextMetricsData {
-                window_pct,
-                at_warning: window_pct >= 80.0,
-            }
-        });
+    let context_metrics = usage.filter(|u| u.has_data()).map(|u| {
+        let window_pct = providers::context_percent(
+            &providers::TokenUsage {
+                prompt_tokens: (u.input_tokens as u32),
+                completion_tokens: (u.output_tokens as u32),
+                cache_read_tokens: (u.cache_read_input_tokens as u32),
+                cache_creation_tokens: (u.cache_creation_input_tokens as u32),
+            },
+            context_limit as u64,
+        );
+        ContextMetricsData {
+            window_pct,
+            at_warning: window_pct >= 80.0,
+        }
+    });
 
     StatuslineView {
         context_pct,
@@ -2662,10 +2660,7 @@ mod tests {
         };
         let segment = build_context_metrics_segment(&view);
         let value = segment.value.unwrap();
-        assert_eq!(
-            value.get("color_tier").and_then(Value::as_str),
-            Some("ok")
-        );
+        assert_eq!(value.get("color_tier").and_then(Value::as_str), Some("ok"));
     }
 
     #[test]
