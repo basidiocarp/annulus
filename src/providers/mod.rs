@@ -140,7 +140,7 @@ fn detect_by_recency() -> Box<dyn TokenProvider> {
 /// Derived context window and pace metrics for operator visibility.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[must_use]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "part of public API; may be used by consumers")]
 pub struct ContextMetrics {
     /// Percentage of context window used (`0.0`–`100.0`), clamped.
     pub window_pct: f32,
@@ -156,7 +156,6 @@ pub struct ContextMetrics {
 /// Returns `0.0` when limit is zero, clamped to `100.0` max.
 #[must_use]
 #[allow(
-    dead_code,
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation
 )]
@@ -172,7 +171,7 @@ pub fn context_percent(usage: &TokenUsage, context_limit: u64) -> f32 {
 ///
 /// `elapsed_minutes` is the session elapsed time. Returns `0.0` when elapsed is zero or negative.
 #[must_use]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "part of public API; may be used by consumers")]
 pub fn pace_delta(usage: &TokenUsage, elapsed_minutes: f64) -> f64 {
     if elapsed_minutes <= 0.0 {
         return 0.0;
@@ -182,7 +181,7 @@ pub fn pace_delta(usage: &TokenUsage, elapsed_minutes: f64) -> f64 {
 }
 
 /// Build `ContextMetrics` from a `TokenUsage`, context limit, and elapsed session time.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "part of public API; may be used by consumers")]
 pub fn context_metrics(
     usage: &TokenUsage,
     context_limit: u64,

@@ -16,6 +16,7 @@ const DEFAULT_SEGMENTS: &[&str] = &[
     "branch",
     "workspace",
     "context-bar",
+    "context-metrics",
     "hyphae",
     "heartbeat",
     // "cortina" is intentionally excluded from the default set until a direct
@@ -152,7 +153,7 @@ mod tests {
     #[test]
     fn test_default_config_has_all_segments() {
         let config = StatuslineConfig::default();
-        assert_eq!(config.segments.len(), 11);
+        assert_eq!(config.segments.len(), 12);
         assert!(config.segments.iter().all(|s| s.enabled));
         let names: Vec<_> = config.segments.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
@@ -167,6 +168,7 @@ mod tests {
                 "branch",
                 "workspace",
                 "context-bar",
+                "context-metrics",
                 "hyphae",
                 "heartbeat",
             ]
@@ -176,7 +178,7 @@ mod tests {
     #[test]
     fn test_load_config_missing_file_returns_defaults() {
         let config = load_config();
-        assert_eq!(config.segments.len(), 11);
+        assert_eq!(config.segments.len(), 12);
         assert!(config.segments.iter().all(|s| s.enabled));
     }
 
@@ -211,7 +213,7 @@ sonnet = 250000
         let result = toml::from_str::<RawConfig>(malformed);
         assert!(result.is_err());
         let config = load_config();
-        assert_eq!(config.segments.len(), 11);
+        assert_eq!(config.segments.len(), 12);
     }
 
     #[test]

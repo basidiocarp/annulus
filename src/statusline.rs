@@ -109,6 +109,13 @@ struct StatuslineView {
     branch: Option<String>,
     workspace_name: Option<String>,
     savings: Option<SavingsStat>,
+    context_metrics: Option<ContextMetricsData>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ContextMetricsData {
+    window_pct: f32,
+    at_warning: bool,
 }
 
 // JSON output types
@@ -362,6 +369,26 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
         .and_then(|session_id| mycelium_session_savings(session_id).ok().flatten())
         .filter(|stat| stat.saved_tokens > 0);
 
+    // Compute context metrics from cumulative usage and context limit.
+    // Uses the full cumulative usage to give operators visibility into total session load.
+    let context_metrics = usage
+        .filter(|u| u.has_data())
+        .map(|u| {
+            let window_pct = providers::context_percent(
+                &providers::TokenUsage {
+                    prompt_tokens: (u.input_tokens as u32),
+                    completion_tokens: (u.output_tokens as u32),
+                    cache_read_tokens: (u.cache_read_input_tokens as u32),
+                    cache_creation_tokens: (u.cache_creation_input_tokens as u32),
+                },
+                context_limit as u64,
+            );
+            ContextMetricsData {
+                window_pct,
+                at_warning: window_pct >= 80.0,
+            }
+        });
+
     StatuslineView {
         context_pct,
         prompt_tokens,
@@ -372,6 +399,7 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
         branch,
         workspace_name,
         savings,
+        context_metrics,
     }
 }
 
@@ -1233,6 +1261,29 @@ impl Segment for ContextBarSegment {
     }
 }
 
+struct ContextMetricsSegment;
+impl Segment for ContextMetricsSegment {
+    fn name(&self) -> &'static str {
+        "context-metrics"
+    }
+    fn line(&self) -> u8 {
+        1
+    }
+    fn render(&self, view: &StatuslineView, color: bool) -> Option<String> {
+        view.context_metrics.as_ref().map(|metrics| {
+            let color_code = if metrics.at_warning {
+                "31" // Red for warning
+            } else if metrics.window_pct >= 60.0 {
+                "33" // Yellow for caution
+            } else {
+                "32" // Green for normal
+            };
+            let pct = (metrics.window_pct * 100.0).round() as u32 / 100;
+            paint(&format!("ctx {}%", pct), color_code, color)
+        })
+    }
+}
+
 struct HyphaeSegment;
 impl Segment for HyphaeSegment {
     fn name(&self) -> &'static str {
@@ -1481,6 +1532,7 @@ fn segments_from_config(config: &StatuslineConfig) -> Vec<Box<dyn Segment>> {
             "branch" => Some(Box::new(BranchSegment)),
             "workspace" => Some(Box::new(WorkspaceSegment)),
             "context-bar" => Some(Box::new(ContextBarSegment)),
+            "context-metrics" => Some(Box::new(ContextMetricsSegment)),
             "hyphae" => Some(Box::new(HyphaeSegment)),
             "heartbeat" => Some(Box::new(HeartbeatSegment)),
             "bridge" => Some(Box::new(BridgeSegment)),
@@ -1543,6 +1595,7 @@ fn build_json_payload(view: &StatuslineView, config: &StatuslineConfig) -> JsonP
             "branch" => build_branch_segment(view),
             "workspace" => build_workspace_segment(view),
             "context-bar" => build_context_bar_segment(view),
+            "context-metrics" => build_context_metrics_segment(view),
             "hyphae" => build_hyphae_segment(),
             "heartbeat" => build_heartbeat_segment(),
             "bridge" => build_bridge_segment(),
@@ -1736,6 +1789,36 @@ fn build_context_bar_segment(view: &StatuslineView) -> JsonSegment {
             available: false,
             value: None,
             reason: Some("no transcript available".to_string()),
+        },
+    }
+}
+
+fn build_context_metrics_segment(view: &StatuslineView) -> JsonSegment {
+    match view.context_metrics {
+        Some(metrics) => {
+            let color_tier = if metrics.at_warning {
+                "danger"
+            } else if metrics.window_pct >= 60.0 {
+                "warning"
+            } else {
+                "ok"
+            };
+            JsonSegment {
+                name: "context-metrics".to_string(),
+                available: true,
+                value: Some(serde_json::json!({
+                    "window_percent": (metrics.window_pct * 100.0).round() as u32 / 100,
+                    "at_warning": metrics.at_warning,
+                    "color_tier": color_tier
+                })),
+                reason: None,
+            }
+        }
+        None => JsonSegment {
+            name: "context-metrics".to_string(),
+            available: false,
+            value: None,
+            reason: Some("no session data available".to_string()),
         },
     }
 }
@@ -2024,6 +2107,10 @@ mod tests {
                     saved_tokens: 8_200,
                     input_tokens: 10_000,
                 }),
+                context_metrics: Some(ContextMetricsData {
+                    window_pct: 42.0,
+                    at_warning: false,
+                }),
             },
             false,
             &segments,
@@ -2051,6 +2138,7 @@ mod tests {
                 branch: None,
                 workspace_name: None,
                 savings: None,
+                context_metrics: None,
             },
             false,
             &segments,
@@ -2201,6 +2289,7 @@ mod tests {
             branch: None,
             workspace_name: None,
             savings: None,
+            context_metrics: None,
         }
     }
 
@@ -2267,6 +2356,10 @@ mod tests {
             savings: Some(SavingsStat {
                 saved_tokens: 45_000,
                 input_tokens: 100_000,
+            }),
+            context_metrics: Some(ContextMetricsData {
+                window_pct: 67.0,
+                at_warning: false,
             }),
         };
         let config = StatuslineConfig::default();
@@ -2346,6 +2439,7 @@ mod tests {
             branch: None,
             workspace_name: None,
             savings: None,
+            context_metrics: None,
         };
         let config = StatuslineConfig::default();
         let payload = build_json_payload(&view, &config);
@@ -2497,6 +2591,97 @@ mod tests {
         assert_eq!(
             value_danger.get("color_tier").and_then(Value::as_str),
             Some("danger")
+        );
+    }
+
+    #[test]
+    fn context_metrics_segment_renders_with_data() {
+        let view = StatuslineView {
+            context_metrics: Some(ContextMetricsData {
+                window_pct: 42.5,
+                at_warning: false,
+            }),
+            ..default_view()
+        };
+        let segment = ContextMetricsSegment;
+        let output = segment.render(&view, false).unwrap();
+        assert!(output.contains("ctx"));
+        assert!(output.contains("42%"));
+    }
+
+    #[test]
+    fn context_metrics_segment_renders_none_when_no_data() {
+        let view = StatuslineView {
+            context_metrics: None,
+            ..default_view()
+        };
+        let segment = ContextMetricsSegment;
+        assert!(segment.render(&view, false).is_none());
+    }
+
+    #[test]
+    fn json_context_metrics_segment_available_with_data() {
+        let view = StatuslineView {
+            context_metrics: Some(ContextMetricsData {
+                window_pct: 72.3,
+                at_warning: true,
+            }),
+            ..default_view()
+        };
+        let segment = build_context_metrics_segment(&view);
+        assert!(segment.available);
+        assert!(segment.reason.is_none());
+        let value = segment.value.unwrap();
+        assert_eq!(value.get("at_warning").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            value.get("color_tier").and_then(Value::as_str),
+            Some("danger")
+        );
+    }
+
+    #[test]
+    fn json_context_metrics_segment_unavailable_when_no_data() {
+        let view = StatuslineView {
+            context_metrics: None,
+            ..default_view()
+        };
+        let segment = build_context_metrics_segment(&view);
+        assert!(!segment.available);
+        assert!(segment.reason.is_some());
+        assert!(segment.value.is_none());
+    }
+
+    #[test]
+    fn json_context_metrics_segment_color_tier_ok() {
+        let view = StatuslineView {
+            context_metrics: Some(ContextMetricsData {
+                window_pct: 45.0,
+                at_warning: false,
+            }),
+            ..default_view()
+        };
+        let segment = build_context_metrics_segment(&view);
+        let value = segment.value.unwrap();
+        assert_eq!(
+            value.get("color_tier").and_then(Value::as_str),
+            Some("ok")
+        );
+    }
+
+    #[test]
+    fn json_context_metrics_segment_color_tier_warning() {
+        let view = StatuslineView {
+            context_metrics: Some(ContextMetricsData {
+                window_pct: 65.0,
+                at_warning: false,
+            }),
+            ..default_view()
+        };
+        let segment = build_context_metrics_segment(&view);
+        let value = segment.value.unwrap();
+        assert_eq!(
+            value.get("color_tier").and_then(Value::as_str),
+            Some("warning")
         );
     }
 
