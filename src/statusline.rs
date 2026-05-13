@@ -372,15 +372,15 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
     // Compute context metrics from cumulative usage and context limit.
     // Uses the full cumulative usage to give operators visibility into total session load.
     let context_metrics = usage.filter(|u| u.has_data()).map(|u| {
-        let window_pct = providers::context_percent(
-            &providers::TokenUsage {
-                prompt_tokens: (u.input_tokens as u32),
-                completion_tokens: (u.output_tokens as u32),
-                cache_read_tokens: (u.cache_read_input_tokens as u32),
-                cache_creation_tokens: (u.cache_creation_input_tokens as u32),
-            },
-            context_limit as u64,
-        );
+        // Token counts per session fit in u32; no message exceeds 4B tokens.
+        #[allow(clippy::cast_possible_truncation)]
+        let token_usage = providers::TokenUsage {
+            prompt_tokens: (u.input_tokens as u32),
+            completion_tokens: (u.output_tokens as u32),
+            cache_read_tokens: (u.cache_read_input_tokens as u32),
+            cache_creation_tokens: (u.cache_creation_input_tokens as u32),
+        };
+        let window_pct = providers::context_percent(&token_usage, context_limit as u64);
         ContextMetricsData {
             window_pct,
             at_warning: window_pct >= 80.0,
@@ -1276,6 +1276,8 @@ impl Segment for ContextMetricsSegment {
             } else {
                 "32" // Green for normal
             };
+            // window_pct is 0–100; truncation and sign loss are not possible here.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let pct = (metrics.window_pct * 100.0).round() as u32 / 100;
             paint(&format!("ctx {}%", pct), color_code, color)
         })
@@ -1801,11 +1803,14 @@ fn build_context_metrics_segment(view: &StatuslineView) -> JsonSegment {
             } else {
                 "ok"
             };
+            // window_pct is 0–100; truncation and sign loss are not possible in practice.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let window_percent = (metrics.window_pct * 100.0).round() as u32 / 100;
             JsonSegment {
                 name: "context-metrics".to_string(),
                 available: true,
                 value: Some(serde_json::json!({
-                    "window_percent": (metrics.window_pct * 100.0).round() as u32 / 100,
+                    "window_percent": window_percent,
                     "at_warning": metrics.at_warning,
                     "color_tier": color_tier
                 })),
@@ -1859,7 +1864,7 @@ fn build_degradation_segment() -> JsonSegment {
             "tools": unavailable.iter().map(|r| {
                 serde_json::json!({
                     "name": &r.tool,
-                    "tier": format!("{}", r.tier),
+                    "tier": r.tier.to_string(),
                     "reason": &r.reason
                 })
             }).collect::<Vec<_>>()

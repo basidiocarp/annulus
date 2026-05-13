@@ -29,7 +29,7 @@ impl ToolReport {
         Self {
             tool: report.tool,
             available: report.available,
-            tier: format!("{}", report.tier),
+            tier: report.tier.to_string(),
             reason: report.reason,
             degraded_capabilities: report.degraded_capabilities,
         }
@@ -73,7 +73,7 @@ pub fn status_table() -> String {
     output.push_str("─────────────────────────────────────────────\n");
 
     for report in reports {
-        let tier_str = format!("{}", report.tier);
+        let tier_str = report.tier.to_string();
         let status = if report.available {
             "OK".to_string()
         } else {
