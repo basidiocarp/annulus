@@ -1,6 +1,7 @@
 use std::io::{self, IsTerminal, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -641,16 +642,38 @@ fn compact_model_name(display_name: &str) -> String {
 
 fn git_branch_for_workspace(cwd: &str) -> Option<String> {
     let cwd = Path::new(cwd);
-    let output = Command::new("git")
+    let mut child = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(cwd)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
-    if !output.status.success() {
-        return None;
+
+    // Wait up to 200ms for git to respond.
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                break;
+            }
+            Ok(None) => {
+                if start.elapsed() > Duration::from_millis(200) {
+                    let _ = child.kill();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => return None,
+        }
     }
 
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let mut buf = String::new();
+    child.stdout?.read_to_string(&mut buf).ok()?;
+    let branch = buf.trim().to_string();
     (!branch.is_empty() && branch != "HEAD").then_some(branch)
 }
 
@@ -1279,7 +1302,7 @@ impl Segment for ContextMetricsSegment {
             // window_pct is 0–100; truncation and sign loss are not possible here.
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let pct = (metrics.window_pct * 100.0).round() as u32 / 100;
-            paint(&format!("ctx {}%", pct), color_code, color)
+            paint(&format!("ctx {pct}%"), color_code, color)
         })
     }
 }
@@ -1915,6 +1938,22 @@ mod tests {
             Some("basidiocarp".to_string())
         );
         assert_eq!(workspace_name_for_dir("/"), None);
+    }
+
+    #[test]
+    fn git_branch_for_workspace_times_out_on_non_git_directory() {
+        let start = std::time::Instant::now();
+        let result = git_branch_for_workspace("/tmp");
+        let elapsed = start.elapsed();
+
+        // Should return None for a non-git directory
+        assert_eq!(result, None);
+        // Should complete well within 1 second (actual timeout is 200ms)
+        assert!(
+            elapsed.as_secs() < 1,
+            "git_branch_for_workspace took too long: {:?}",
+            elapsed
+        );
     }
 
     #[test]
