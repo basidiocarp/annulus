@@ -701,6 +701,7 @@ fn mycelium_session_savings_at_path(
     }
 
     let conn = Connection::open(db_path)?;
+    conn.busy_timeout(Duration::from_millis(500))?;
     let row = conn
         .query_row(
             "SELECT COALESCE(SUM(saved_tokens), 0), COALESCE(SUM(input_tokens), 0)
@@ -870,6 +871,7 @@ fn tool_adoption_stat_at_path(path: &Path) -> Option<ToolAdoptionStat> {
     }
 
     let conn = Connection::open(path).ok()?;
+    conn.busy_timeout(Duration::from_millis(500)).ok()?;
     let json_str = conn
         .query_row(
             "SELECT score_json FROM tool_adoption_scores ORDER BY rowid DESC LIMIT 1",
@@ -903,6 +905,7 @@ fn canopy_unread_count_at_path(path: &Path) -> Option<u32> {
     }
 
     let conn = Connection::open(path).ok()?;
+    conn.busy_timeout(Duration::from_millis(500)).ok()?;
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM notifications WHERE seen = 0",
