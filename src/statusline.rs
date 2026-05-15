@@ -1,6 +1,7 @@
 use std::io::{self, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -208,12 +209,14 @@ fn resolve_provider(
         .and_then(validated_session_path);
 
     if let Some(name) = explicit {
+        tracing::debug!(provider = %name, explicit = true, "annulus: provider resolved");
         build_provider_by_name(name, input, validated_session.as_deref())
     } else {
         // Auto-detect: pick the most recently active provider, then
         // overlay session identity if available.
         let detected = providers::detect_provider(None);
         let name = detected.name();
+        tracing::debug!(provider = %name, explicit = false, "annulus: provider resolved");
         if validated_session.is_some() || name == "claude" {
             build_provider_by_name(name, input, validated_session.as_deref())
         } else {
@@ -291,6 +294,10 @@ fn build_provider_by_name(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Statusline view aggregates multiple data sources"
+)]
 fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> StatuslineView {
     // Route through the provider abstraction. `resolve_provider` selects the
     // active provider from the input's `provider` field, the config's
@@ -305,10 +312,21 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
     // For Claude, read the full transcript breakdown via the streaming path.
     // For other providers, call session_usage() for cumulative token counts.
     let transcript_usage = if provider.name() == "claude" {
-        input
-            .transcript_path
-            .as_deref()
-            .and_then(|path| read_transcript_usage(path).ok())
+        if let Some(path) = &input.transcript_path {
+            match read_transcript_usage(path) {
+                Ok(usage) => {
+                    tracing::debug!("transcript parsed {} entries", usage.requests);
+                    Some(usage)
+                }
+                Err(e) => {
+                    tracing::debug!("transcript read error: {e}");
+                    None
+                }
+            }
+        } else {
+            tracing::debug!("no transcript_path");
+            None
+        }
     } else {
         None
     };
@@ -319,6 +337,13 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
     } else {
         provider
             .session_usage()
+            .map_err(|e| {
+                eprintln!(
+                    "annulus: provider '{}' session_usage error: {e}",
+                    provider.name()
+                );
+                e
+            })
             .ok()
             .flatten()
             .map(|u| TokenUsage {
@@ -434,6 +459,9 @@ fn read_transcript_usage(path: &str) -> Result<TranscriptUsage> {
     reason = "Statusline percentage is presentation-only and explicitly clamped"
 )]
 fn context_pct_for_usage(usage: TokenUsage, context_limit: usize) -> u8 {
+    if context_limit == 0 {
+        return 0;
+    }
     let pct = ((usage.prompt_tokens() as f64 / context_limit as f64) * 100.0).round();
     pct.clamp(0.0, 255.0) as u8
 }
@@ -640,9 +668,23 @@ fn compact_model_name(display_name: &str) -> String {
     }
 }
 
+fn git_path() -> Option<PathBuf> {
+    static CACHED_GIT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    CACHED_GIT
+        .get_or_init(|| {
+            let result = which::which("git").ok();
+            if result.is_none() {
+                tracing::debug!("annulus: git not found on PATH; branch segment will be hidden");
+            }
+            result
+        })
+        .clone()
+}
+
 fn git_branch_for_workspace(cwd: &str) -> Option<String> {
+    let git_path = git_path()?;
     let cwd = Path::new(cwd);
-    let mut child = Command::new("git")
+    let mut child = Command::new(&git_path)
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(cwd)
         .stdout(Stdio::piped())
@@ -870,7 +912,13 @@ fn tool_adoption_stat_at_path(path: &Path) -> Option<ToolAdoptionStat> {
         return None;
     }
 
-    let conn = Connection::open(path).ok()?;
+    let conn = match Connection::open(path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!("annulus: canopy db open failed: path={:?}, error={e}", path);
+            return None;
+        }
+    };
     conn.busy_timeout(Duration::from_millis(500)).ok()?;
     let json_str = conn
         .query_row(
@@ -1069,8 +1117,7 @@ fn build_heartbeat_segment_at_path(path: &Path) -> JsonSegment {
     match heartbeat_status_at_path(path) {
         HeartbeatStatus::Fresh(data) => {
             let text = match data.status.as_str() {
-                "running" if data.current_task.is_some() => {
-                    let task = data.current_task.as_ref().unwrap();
+                "running" if let Some(task) = &data.current_task => {
                     let truncated = if task.len() > 20 {
                         format!("{}...", &task[..20])
                     } else {
@@ -1342,8 +1389,7 @@ impl Segment for HeartbeatSegment {
         match heartbeat_status_at_path(&heartbeat_path()) {
             HeartbeatStatus::Fresh(data) => {
                 let (text, color_code) = match data.status.as_str() {
-                    "running" if data.current_task.is_some() => {
-                        let task = data.current_task.as_ref().unwrap();
+                    "running" if let Some(task) = &data.current_task => {
                         let truncated = if task.len() > 20 {
                             format!("{}...", &task[..20])
                         } else {

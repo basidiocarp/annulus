@@ -1,12 +1,29 @@
 use anyhow::Result;
 use rusqlite::{Connection, params};
 use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 type NotificationRow = (String, String, Option<String>, Option<String>, String);
 
 fn canopy_db_path() -> Option<PathBuf> {
     let path = spore::paths::data_dir("canopy").join("canopy.db");
     path.exists().then_some(path)
+}
+
+fn osascript_path() -> Option<PathBuf> {
+    static CACHED_OSASCRIPT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    CACHED_OSASCRIPT
+        .get_or_init(|| {
+            let result = which::which("osascript").ok();
+            if result.is_none() {
+                tracing::debug!(
+                    "annulus: osascript not found on PATH; notifications will be no-ops"
+                );
+            }
+            result
+        })
+        .clone()
 }
 
 pub fn handle(poll: bool, system: bool) -> Result<()> {
@@ -16,11 +33,12 @@ pub fn handle(poll: bool, system: bool) -> Result<()> {
     };
 
     let conn = Connection::open(&db_path)?;
+    conn.busy_timeout(Duration::from_millis(500))?;
 
     // Query unread notifications
     let mut stmt = conn.prepare(
         "SELECT notification_id, event_type, task_id, agent_id, created_at
-         FROM notifications WHERE seen = 0 ORDER BY created_at DESC",
+         FROM notifications WHERE seen = 0 ORDER BY created_at DESC LIMIT 100",
     )?;
     let rows: Vec<NotificationRow> = stmt
         .query_map([], |row| {
@@ -45,17 +63,35 @@ pub fn handle(poll: bool, system: bool) -> Result<()> {
         println!("[{created_at}] {event_type} (task: {task}) [{id}]");
     }
 
+    // If we hit the limit, show a note about remaining unread
+    if rows.len() == 100 {
+        let total_unread: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM notifications WHERE seen = 0",
+            [],
+            |row| row.get(0),
+        )?;
+        println!("(showing 100 of {total_unread} unread)");
+    }
+
     if system {
         // macOS system notification — best effort, no error on failure
-        let _ = std::process::Command::new("osascript")
-            .args([
-                "-e",
-                &format!(
-                    "display notification \"{} unread canopy notification(s)\" with title \"Annulus\"",
-                    rows.len()
-                ),
-            ])
-            .output();
+        if let Some(osascript) = osascript_path() {
+            let output = std::process::Command::new(&osascript)
+                .args([
+                    "-e",
+                    &format!(
+                        "display notification \"{} unread canopy notification(s)\" with title \"Annulus\"",
+                        rows.len()
+                    ),
+                ])
+                .output();
+
+            if let Ok(out) = output {
+                if !out.status.success() {
+                    tracing::debug!("osascript notification failed: exit={}", out.status);
+                }
+            }
+        }
     }
 
     if poll {

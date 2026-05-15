@@ -6,6 +6,28 @@ use serde::Deserialize;
 
 const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
 
+const KNOWN_PROVIDERS: &[&str] = &["claude", "codex", "gemini"];
+
+/// All segment names accepted by the statusline, including those not in `DEFAULT_SEGMENTS`.
+const ALL_SEGMENT_NAMES: &[&str] = &[
+    "context",
+    "usage",
+    "cost",
+    "model",
+    "savings",
+    "degradation",
+    "branch",
+    "workspace",
+    "context-bar",
+    "context-metrics",
+    "hyphae",
+    "heartbeat",
+    "bridge",
+    "canopy-adoption",
+    "canopy-notifications",
+    "cortina",
+];
+
 const DEFAULT_SEGMENTS: &[&str] = &[
     "context",
     "usage",
@@ -120,12 +142,19 @@ pub fn load_config() -> StatuslineConfig {
                 StatuslineConfig::default().segments
             } else {
                 for entry in &raw.segments {
-                    if !DEFAULT_SEGMENTS.contains(&entry.name.as_str()) {
+                    if !ALL_SEGMENT_NAMES.contains(&entry.name.as_str()) {
                         eprintln!("annulus: unknown segment name '{}' in config", entry.name);
                     }
                 }
                 raw.segments
             };
+            if let Some(ref p) = raw.provider {
+                if !KNOWN_PROVIDERS.contains(&p.as_str()) {
+                    eprintln!(
+                        "annulus: unrecognised provider '{p}' in config; falling back to auto-detect"
+                    );
+                }
+            }
             StatuslineConfig {
                 segments,
                 context_limits: raw.context_limits,
@@ -149,6 +178,17 @@ fn config_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_default_segments_is_subset_of_all_segment_names() {
+        for default_seg in DEFAULT_SEGMENTS {
+            assert!(
+                ALL_SEGMENT_NAMES.contains(default_seg),
+                "DEFAULT_SEGMENTS contains '{}' which is not in ALL_SEGMENT_NAMES",
+                default_seg
+            );
+        }
+    }
 
     #[test]
     fn test_default_config_has_all_segments() {

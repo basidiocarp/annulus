@@ -127,12 +127,22 @@ fn detect_by_recency() -> Box<dyn TokenProvider> {
     // If any candidate had a timestamp, use the winner; otherwise fall back to Claude.
     if best_ts.is_some() {
         // Consume the winner by rebuilding it — we can't move out of a Vec<Box<dyn ...>>.
+        let winner_name = match best_idx {
+            1 => "codex",
+            2 => "gemini",
+            _ => "claude",
+        };
+        tracing::debug!(
+            provider = winner_name,
+            "annulus: provider auto-detected by recency"
+        );
         match best_idx {
             1 => Box::new(CodexProvider::new()),
             2 => Box::new(GeminiProvider::new()),
             _ => Box::new(ClaudeProvider::default()),
         }
     } else {
+        tracing::debug!("annulus: no provider timestamps available; defaulting to claude");
         Box::new(ClaudeProvider::default())
     }
 }

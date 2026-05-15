@@ -101,6 +101,15 @@ fn most_recent_session(dir: &std::path::Path) -> Option<(u64, PathBuf)> {
 ///
 /// Returns `Ok(None)` when the file contains zero usable token entries.
 fn read_session_file(path: &std::path::Path) -> anyhow::Result<Option<TokenUsage>> {
+    const MAX_SESSION_FILE_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
+    let meta = std::fs::metadata(path)?;
+    if meta.len() > MAX_SESSION_FILE_BYTES {
+        eprintln!(
+            "annulus: gemini session file too large ({} bytes), skipping",
+            meta.len()
+        );
+        return Ok(None);
+    }
     let content = fs::read_to_string(path)?;
 
     // Treat truncated or malformed JSON as "no data" per the edge-case spec.

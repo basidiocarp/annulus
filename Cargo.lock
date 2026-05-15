@@ -35,6 +35,8 @@ dependencies = [
  "spore",
  "tempfile",
  "toml",
+ "tracing",
+ "which",
 ]
 
 [[package]]
