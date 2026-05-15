@@ -8,10 +8,13 @@
 //   Missing/unreadable file → empty state, no error.
 
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
+
+const MAX_BRIDGE_MESSAGE_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BridgeEntry {
@@ -43,9 +46,15 @@ pub fn bridge_path() -> PathBuf {
 
 pub fn read_bridge(path: &std::path::Path) -> BridgeState {
     // Read file, parse JSON, filter stale entries
-    let Ok(contents) = fs::read_to_string(path) else {
+    let Ok(file) = fs::File::open(path) else {
         return BridgeState::default();
     };
+
+    let mut contents = String::new();
+    let mut limited_reader = file.take(MAX_BRIDGE_MESSAGE_BYTES as u64);
+    if limited_reader.read_to_string(&mut contents).is_err() {
+        return BridgeState::default();
+    }
 
     let Ok(bridge_file) = serde_json::from_str::<BridgeFile>(&contents) else {
         return BridgeState::default();

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -95,11 +95,13 @@ pub fn handle(poll: bool, system: bool) -> Result<()> {
     }
 
     if poll {
-        // Mark all as read
-        conn.execute(
-            "UPDATE notifications SET seen = 1 WHERE seen = 0",
-            params![],
-        )?;
+        // Mark only the fetched notifications as read using a subquery to avoid TOCTOU race
+        // where notifications arriving between SELECT and UPDATE would be silently marked seen.
+        let ids: Vec<&str> = rows.iter().map(|(id, _, _, _, _)| id.as_str()).collect();
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query =
+            format!("UPDATE notifications SET seen = 1 WHERE notification_id IN ({placeholders})");
+        conn.execute(&query, rusqlite::params_from_iter(ids))?;
         println!("Marked {} notification(s) as read.", rows.len());
     }
 
@@ -108,8 +110,7 @@ pub fn handle(poll: bool, system: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use rusqlite::Connection;
+    use rusqlite::{Connection, params};
     use tempfile::TempDir;
 
     fn setup_db_with_notifications(dir: &TempDir, count: usize) -> std::path::PathBuf {
@@ -161,11 +162,8 @@ mod tests {
         assert_eq!(count, 2);
 
         // Mark as read
-        conn.execute(
-            "UPDATE notifications SET seen = 1 WHERE seen = 0",
-            params![],
-        )
-        .unwrap();
+        conn.execute("UPDATE notifications SET seen = 1 WHERE seen = 0", [])
+            .unwrap();
         let after: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM notifications WHERE seen = 0",

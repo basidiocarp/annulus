@@ -102,6 +102,8 @@ fn collect_session_files(dir: &Path) -> Vec<PathBuf> {
 // Per-file scanning
 // ─────────────────────────────────────────────────────────────────────────────
 
+const MAX_SESSION_FILE_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
+
 #[derive(Default)]
 struct Bucket {
     last_prompt: u64,
@@ -115,6 +117,14 @@ struct Bucket {
 /// `completion_tokens` = sum of all `candidatesTokenCount`. The model label
 /// defaults to `"gemini"` since Gemini session files do not carry a model field.
 fn scan_session_file(path: &Path, runtime_id: &str) -> Vec<UsageRow> {
+    let Ok(meta) = fs::metadata(path) else {
+        return Vec::new();
+    };
+    if meta.len() > MAX_SESSION_FILE_BYTES {
+        tracing::warn!(path = %path.display(), size = meta.len(), "gemini session file too large, skipping");
+        return Vec::new();
+    }
+
     let Ok(content) = fs::read_to_string(path) else {
         return Vec::new();
     };

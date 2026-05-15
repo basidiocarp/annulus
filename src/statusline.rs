@@ -367,7 +367,7 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
     let latest_assistant = transcript_usage.and_then(|usage| usage.latest_assistant);
     let context_pct = latest_assistant
         .filter(|usage| usage.has_data())
-        .map(|usage| context_pct_for_usage(usage, context_limit));
+        .and_then(|usage| context_pct_for_usage(usage, context_limit));
     let (prompt_tokens, context_limit_value) = match latest_assistant {
         Some(usage) if usage.has_data() => {
             // Context limits for models fit in u32 (no model has > 4B tokens)
@@ -458,12 +458,12 @@ fn read_transcript_usage(path: &str) -> Result<TranscriptUsage> {
     clippy::cast_sign_loss,
     reason = "Statusline percentage is presentation-only and explicitly clamped"
 )]
-fn context_pct_for_usage(usage: TokenUsage, context_limit: usize) -> u8 {
+fn context_pct_for_usage(usage: TokenUsage, context_limit: usize) -> Option<u8> {
     if context_limit == 0 {
-        return 0;
+        return None;
     }
     let pct = ((usage.prompt_tokens() as f64 / context_limit as f64) * 100.0).round();
-    pct.clamp(0.0, 255.0) as u8
+    Some(pct.clamp(0.0, 255.0) as u8)
 }
 
 #[allow(clippy::if_same_then_else)] // o3-mini and o4-mini share identical pricing today; keep them explicit for future divergence
@@ -2000,8 +2000,7 @@ mod tests {
         // Should complete well within 1 second (actual timeout is 200ms)
         assert!(
             elapsed.as_secs() < 1,
-            "git_branch_for_workspace took too long: {:?}",
-            elapsed
+            "git_branch_for_workspace took too long: {elapsed:?}"
         );
     }
 

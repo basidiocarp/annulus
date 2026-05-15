@@ -184,8 +184,7 @@ mod tests {
         for default_seg in DEFAULT_SEGMENTS {
             assert!(
                 ALL_SEGMENT_NAMES.contains(default_seg),
-                "DEFAULT_SEGMENTS contains '{}' which is not in ALL_SEGMENT_NAMES",
-                default_seg
+                "DEFAULT_SEGMENTS contains '{default_seg}' which is not in ALL_SEGMENT_NAMES"
             );
         }
     }
@@ -327,5 +326,41 @@ enabled = false
         config.context_limits.insert("gpt-5.4".to_string(), 500_000);
 
         assert_eq!(config.context_limit_for_model("GPT-5.4 mini"), 500_000);
+    }
+
+    #[test]
+    fn all_segment_names_is_complete() {
+        // This test verifies that ALL_SEGMENT_NAMES contains all segments that
+        // are actually implemented in statusline.rs and vice versa.
+        // If a segment is added without updating ALL_SEGMENT_NAMES, this test fails.
+        let expected = vec![
+            "context",
+            "usage",
+            "cost",
+            "model",
+            "savings",
+            "degradation",
+            "branch",
+            "workspace",
+            "context-bar",
+            "context-metrics",
+            "hyphae",
+            "heartbeat",
+            "bridge",
+            "canopy-adoption",
+            "canopy-notifications",
+            "cortina",
+        ];
+
+        let mut all_seg_names = ALL_SEGMENT_NAMES.to_vec();
+        all_seg_names.sort_unstable();
+
+        let mut expected_sorted = expected;
+        expected_sorted.sort_unstable();
+
+        assert_eq!(
+            all_seg_names, expected_sorted,
+            "ALL_SEGMENT_NAMES is out of sync with registered segments"
+        );
     }
 }
