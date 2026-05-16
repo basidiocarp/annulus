@@ -40,11 +40,7 @@ fn estimate_cost(prompt_tokens: u64, completion_tokens: u64) -> f64 {
 /// Extract the `YYYY-MM-DD` date prefix from an ISO 8601 string such as
 /// `"2026-04-11T16:44:46.069Z"`. Returns `None` for anything shorter.
 fn date_from_iso8601(ts: &str) -> Option<String> {
-    if ts.len() >= 10 {
-        Some(ts[..10].to_owned())
-    } else {
-        None
-    }
+    ts.get(..10).map(str::to_owned)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -97,7 +93,7 @@ fn extract_model_from_raw(line: &str) -> Option<String> {
     let after = after.trim_start_matches(':').trim_start();
     let after = after.trim_start_matches('"');
     let end = after.find('"')?;
-    let model = &after[..end];
+    let model = after.get(..end)?;
     if model.is_empty() {
         None
     } else {

@@ -463,7 +463,7 @@ fn context_pct_for_usage(usage: TokenUsage, context_limit: usize) -> Option<u8> 
         return None;
     }
     let pct = ((usage.prompt_tokens() as f64 / context_limit as f64) * 100.0).round();
-    Some(pct.clamp(0.0, 255.0) as u8)
+    Some(pct.clamp(0.0, 100.0) as u8)
 }
 
 #[allow(clippy::if_same_then_else)] // o3-mini and o4-mini share identical pricing today; keep them explicit for future divergence
@@ -1118,8 +1118,9 @@ fn build_heartbeat_segment_at_path(path: &Path) -> JsonSegment {
         HeartbeatStatus::Fresh(data) => {
             let text = match data.status.as_str() {
                 "running" if let Some(task) = &data.current_task => {
-                    let truncated = if task.len() > 20 {
-                        format!("{}...", &task[..20])
+                    let truncated = if task.chars().count() > 20 {
+                        let end = task.char_indices().nth(20).map_or(task.len(), |(i, _)| i);
+                        format!("{}...", &task[..end])
                     } else {
                         task.clone()
                     };
@@ -1390,8 +1391,9 @@ impl Segment for HeartbeatSegment {
             HeartbeatStatus::Fresh(data) => {
                 let (text, color_code) = match data.status.as_str() {
                     "running" if let Some(task) = &data.current_task => {
-                        let truncated = if task.len() > 20 {
-                            format!("{}...", &task[..20])
+                        let truncated = if task.chars().count() > 20 {
+                            let end = task.char_indices().nth(20).map_or(task.len(), |(i, _)| i);
+                            format!("{}...", &task[..end])
                         } else {
                             task.clone()
                         };
@@ -1569,6 +1571,12 @@ impl Segment for DegradationSegment {
     }
 }
 
+/// Returns the default segment list for use in tests.
+///
+/// Production code must not call this — `segments_from_config` with a `StatuslineConfig::default()`
+/// is the correct path. This helper exists only so tests can obtain a concrete segment vec without
+/// constructing a full config.
+#[cfg(test)]
 fn default_segments() -> Vec<Box<dyn Segment>> {
     vec![
         Box::new(ContextSegment),
@@ -1580,14 +1588,17 @@ fn default_segments() -> Vec<Box<dyn Segment>> {
         Box::new(BranchSegment),
         Box::new(WorkspaceSegment),
         Box::new(ContextBarSegment),
+        Box::new(ContextMetricsSegment),
         Box::new(HyphaeSegment),
+        Box::new(HeartbeatSegment),
     ]
 }
 
 fn segments_from_config(config: &StatuslineConfig) -> Vec<Box<dyn Segment>> {
-    if config.segments.is_empty() {
-        return default_segments();
-    }
+    // config.segments is always non-empty: load_config() falls back to
+    // StatuslineConfig::default() which builds from DEFAULT_SEGMENTS.
+    // An empty list here is a caller bug, not a normal case.
+    debug_assert!(!config.segments.is_empty(), "segments_from_config called with empty config");
 
     let mut segments: Vec<Box<dyn Segment>> = vec![];
     for entry in &config.segments {

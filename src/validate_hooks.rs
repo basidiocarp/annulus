@@ -92,7 +92,13 @@ fn extract_paths_from_command(command: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let home = dirs::home_dir();
 
-    for token in command.split_whitespace() {
+    // Use a shell-aware tokenizer so that quoted paths with spaces are kept intact.
+    // Fall back to whitespace splitting when the command is not valid shell syntax.
+    let tokens: Vec<String> = shlex::split(command).unwrap_or_else(|| {
+        command.split_whitespace().map(String::from).collect()
+    });
+
+    for token in &tokens {
         let candidate = token.trim_matches(|ch| matches!(ch, '"' | '\''));
 
         let path = if let Some(suffix) = candidate.strip_prefix("$HOME/") {

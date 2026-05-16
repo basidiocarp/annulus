@@ -156,23 +156,38 @@ fn parse_iso8601_to_epoch_secs(s: &str) -> Option<f64> {
         return None;
     }
     let month: u32 = s.get(5..7)?.parse().ok()?;
+    if !(1..=12).contains(&month) {
+        return None;
+    }
     if s.as_bytes().get(7) != Some(&b'-') {
         return None;
     }
     let day: u32 = s.get(8..10)?.parse().ok()?;
+    if !(1..=31).contains(&day) {
+        return None;
+    }
     let sep = s.as_bytes().get(10)?;
     if *sep != b'T' && *sep != b' ' {
         return None;
     }
     let hour: u32 = s.get(11..13)?.parse().ok()?;
+    if hour > 23 {
+        return None;
+    }
     if s.as_bytes().get(13) != Some(&b':') {
         return None;
     }
     let minute: u32 = s.get(14..16)?.parse().ok()?;
+    if minute > 59 {
+        return None;
+    }
     if s.as_bytes().get(16) != Some(&b':') {
         return None;
     }
     let second: u32 = s.get(17..19)?.parse().ok()?;
+    if second > 59 {
+        return None;
+    }
 
     // Optional fractional seconds.
     let mut idx = 19;
@@ -706,7 +721,8 @@ mod tests {
     fn iso8601_parser_returns_none_on_garbage() {
         assert!(parse_iso8601_to_epoch_secs("not a date").is_none());
         assert!(parse_iso8601_to_epoch_secs("").is_none());
-        assert!(parse_iso8601_to_epoch_secs("2026-13-40T25:99:99Z").is_some());
+        // Out-of-range components must return None after range validation was added.
+        assert!(parse_iso8601_to_epoch_secs("2026-13-40T25:99:99Z").is_none());
         // Sanity: known value for 2026-04-11T16:44:46.069Z.
         // Verified via `python3 -c "import datetime as d;
         //   print(d.datetime(2026,4,11,16,44,46, tzinfo=d.timezone.utc).timestamp())"`.
