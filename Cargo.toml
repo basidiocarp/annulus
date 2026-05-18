@@ -49,5 +49,7 @@ strip = true
 unsafe_code = "warn"
 
 [lints.clippy]
-all = "warn"
+all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+# Pre-existing pedantic violations to be addressed incrementally.
+match_wildcard_for_single_variants = "allow"

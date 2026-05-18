@@ -3088,11 +3088,10 @@ mod tests {
             ),
         }
 
-        let view = default_view();
-        let seg = CortinaSegment;
-        // Note: seg.render() will use the real temp dir, so we can't easily test it
-        // here without mocking. The segment uses cortina_session_status() which reads
-        // from the actual system temp directory.
+        let _view = default_view();
+        // Note: CortinaSegment::render() uses cortina_session_status() which reads
+        // from the actual system temp directory, so it cannot be easily tested here
+        // without mocking.
 
         // JSON render: unavailable when no session state file (for empty dir)
         assert!(!matches!(status, CortinaStatus::Active { .. }));
