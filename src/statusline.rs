@@ -1134,7 +1134,12 @@ fn cortina_session_status_at_path(temp_dir: &Path) -> CortinaStatus {
             if name_str.starts_with("cortina-session-") && name_str.ends_with(".json") {
                 // Get metadata for modification time
                 if let Ok(metadata) = std::fs::metadata(&path) {
-                    session_files.push((path, metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)));
+                    session_files.push((
+                        path,
+                        metadata
+                            .modified()
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                    ));
                 }
             }
         }
@@ -1171,7 +1176,10 @@ fn cortina_session_status() -> CortinaStatus {
 /// JSON data for the cortina segment.
 fn build_cortina_segment() -> JsonSegment {
     match cortina_session_status() {
-        CortinaStatus::Active { session_id, project } => {
+        CortinaStatus::Active {
+            session_id,
+            project,
+        } => {
             // Display the project name if available, otherwise the session ID
             let display_text = if project.is_empty() {
                 session_id.clone()
@@ -1693,7 +1701,10 @@ fn segments_from_config(config: &StatuslineConfig) -> Vec<Box<dyn Segment>> {
     // config.segments is always non-empty: load_config() falls back to
     // StatuslineConfig::default() which builds from DEFAULT_SEGMENTS.
     // An empty list here is a caller bug, not a normal case.
-    debug_assert!(!config.segments.is_empty(), "segments_from_config called with empty config");
+    debug_assert!(
+        !config.segments.is_empty(),
+        "segments_from_config called with empty config"
+    );
 
     let mut segments: Vec<Box<dyn Segment>> = vec![];
     for entry in &config.segments {
@@ -3061,7 +3072,8 @@ mod tests {
     #[test]
     fn cortina_segment_always_unavailable_stub() {
         // Create an empty temp directory to ensure no cortina session files exist
-        let test_dir = std::env::temp_dir().join(format!("annulus-test-cortina-{}", std::process::id()));
+        let test_dir =
+            std::env::temp_dir().join(format!("annulus-test-cortina-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&test_dir);
         let _ = std::fs::create_dir(&test_dir);
 
@@ -3071,7 +3083,9 @@ mod tests {
             CortinaStatus::Unavailable => {
                 // This is expected when no session files exist
             }
-            _ => panic!("cortina_session_status_at_path should return Unavailable for empty directory"),
+            _ => panic!(
+                "cortina_session_status_at_path should return Unavailable for empty directory"
+            ),
         }
 
         let view = default_view();

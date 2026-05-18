@@ -94,9 +94,8 @@ fn extract_paths_from_command(command: &str) -> Vec<PathBuf> {
 
     // Use a shell-aware tokenizer so that quoted paths with spaces are kept intact.
     // Fall back to whitespace splitting when the command is not valid shell syntax.
-    let tokens: Vec<String> = shlex::split(command).unwrap_or_else(|| {
-        command.split_whitespace().map(String::from).collect()
-    });
+    let tokens: Vec<String> = shlex::split(command)
+        .unwrap_or_else(|| command.split_whitespace().map(String::from).collect());
 
     for token in &tokens {
         let candidate = token.trim_matches(|ch| matches!(ch, '"' | '\''));
