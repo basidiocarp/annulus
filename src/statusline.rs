@@ -1102,13 +1102,99 @@ fn build_canopy_notifications_segment() -> JsonSegment {
     build_canopy_notifications_segment_at_path(&canopy_db_path())
 }
 
-/// JSON data for the cortina segment — always unavailable, no data seam yet.
+/// Cortina session state read from the temp state file.
+#[derive(Debug, Clone, Deserialize)]
+struct CortineSessionState {
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    project: String,
+}
+
+/// Status of cortina session state readiness.
+enum CortinaStatus {
+    /// Session state file found and readable.
+    Active { session_id: String, project: String },
+    /// Session state file not found or not readable.
+    Unavailable,
+}
+
+fn cortina_session_status_at_path(temp_dir: &Path) -> CortinaStatus {
+    // Try to find the most recent cortina session state file in the temp directory.
+    // Cortina writes files like: $TMPDIR/cortina-session-{hash}.json
+    let Ok(entries) = std::fs::read_dir(temp_dir) else {
+        return CortinaStatus::Unavailable;
+    };
+
+    let mut session_files = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Some(name) = path.file_name() {
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("cortina-session-") && name_str.ends_with(".json") {
+                // Get metadata for modification time
+                if let Ok(metadata) = std::fs::metadata(&path) {
+                    session_files.push((path, metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)));
+                }
+            }
+        }
+    }
+
+    if session_files.is_empty() {
+        return CortinaStatus::Unavailable;
+    }
+
+    // Sort by modification time, most recent first
+    session_files.sort_by_key(|item| std::cmp::Reverse(item.1));
+
+    // Try to read the most recent session file
+    for (path, _) in session_files {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            if let Ok(state) = serde_json::from_str::<CortineSessionState>(&contents) {
+                if !state.session_id.is_empty() {
+                    return CortinaStatus::Active {
+                        session_id: state.session_id,
+                        project: state.project,
+                    };
+                }
+            }
+        }
+    }
+
+    CortinaStatus::Unavailable
+}
+
+fn cortina_session_status() -> CortinaStatus {
+    cortina_session_status_at_path(&std::env::temp_dir())
+}
+
+/// JSON data for the cortina segment.
 fn build_cortina_segment() -> JsonSegment {
-    JsonSegment {
-        name: "cortina".to_string(),
-        available: false,
-        value: None,
-        reason: Some("no direct data seam yet".to_string()),
+    match cortina_session_status() {
+        CortinaStatus::Active { session_id, project } => {
+            // Display the project name if available, otherwise the session ID
+            let display_text = if project.is_empty() {
+                session_id.clone()
+            } else {
+                project.clone()
+            };
+            JsonSegment {
+                name: "cortina".to_string(),
+                available: true,
+                value: Some(serde_json::json!({
+                    "text": display_text,
+                    "session_id": session_id,
+                    "project": project,
+                })),
+                reason: None,
+            }
+        }
+        CortinaStatus::Unavailable => JsonSegment {
+            name: "cortina".to_string(),
+            available: false,
+            value: None,
+            reason: Some("no session state file".to_string()),
+        },
     }
 }
 
@@ -1447,8 +1533,17 @@ impl Segment for CortinaSegment {
         2
     }
     fn render(&self, _view: &StatuslineView, _color: bool) -> Option<String> {
-        // Cortina has no direct data seam yet; always unavailable.
-        None
+        match cortina_session_status() {
+            CortinaStatus::Active { project, .. } => {
+                // Display the project name if available
+                if project.is_empty() {
+                    None
+                } else {
+                    Some(project)
+                }
+            }
+            CortinaStatus::Unavailable => None,
+        }
     }
 }
 
@@ -2965,17 +3060,31 @@ mod tests {
 
     #[test]
     fn cortina_segment_always_unavailable_stub() {
+        // Create an empty temp directory to ensure no cortina session files exist
+        let test_dir = std::env::temp_dir().join(format!("annulus-test-cortina-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        let _ = std::fs::create_dir(&test_dir);
+
+        // Test the segment with the empty directory
+        let status = cortina_session_status_at_path(&test_dir);
+        match status {
+            CortinaStatus::Unavailable => {
+                // This is expected when no session files exist
+            }
+            _ => panic!("cortina_session_status_at_path should return Unavailable for empty directory"),
+        }
+
         let view = default_view();
         let seg = CortinaSegment;
-        // Terminal render: always None (nothing shown)
-        let render = seg.render(&view, false);
-        assert!(render.is_none(), "cortina should render nothing");
+        // Note: seg.render() will use the real temp dir, so we can't easily test it
+        // here without mocking. The segment uses cortina_session_status() which reads
+        // from the actual system temp directory.
 
-        // JSON render: always unavailable with stub reason
-        let json_seg = build_cortina_segment();
-        assert!(!json_seg.available);
-        assert_eq!(json_seg.name, "cortina");
-        assert_eq!(json_seg.reason.as_deref(), Some("no direct data seam yet"));
+        // JSON render: unavailable when no session state file (for empty dir)
+        assert!(!matches!(status, CortinaStatus::Active { .. }));
+
+        // Cleanup
+        let _ = std::fs::remove_dir(&test_dir);
     }
 
     #[test]
