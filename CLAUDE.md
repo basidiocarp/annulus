@@ -64,12 +64,21 @@ src/
 ├── statusline.rs      # Segment rendering and composition
 ├── status.rs          # Ecosystem status (probe-based)
 ├── config.rs          # Statusline configuration (TOML)
+├── config_export.rs   # Serialize resolved config for operator inspection
+├── bridge.rs          # Flag-file bridge for transient mode signaling (~/.config/annulus/bridge.json)
+├── notify.rs          # Notification polling and macOS system notification delivery
 ├── validate_hooks.rs  # Hook path validation
-└── providers/
-    ├── mod.rs         # TokenProvider trait and auto-detection
-    ├── claude.rs      # Claude NDJSON transcript reader
-    ├── codex.rs       # Codex NDJSON session reader
-    └── gemini.rs      # Gemini JSON session reader
+├── providers/
+│   ├── mod.rs         # TokenProvider trait and auto-detection
+│   ├── claude.rs      # Claude NDJSON transcript reader
+│   ├── codex.rs       # Codex NDJSON session reader
+│   └── gemini.rs      # Gemini JSON session reader
+└── usage/
+    ├── mod.rs         # Usage aggregation and display
+    ├── claude.rs      # Claude usage reader
+    ├── codex.rs       # Codex usage reader
+    ├── gemini.rs      # Gemini usage reader
+    └── storage.rs     # Usage persistence
 ```
 
 - **main.rs**: Clap CLI with `statusline` and `validate-hooks` subcommands.
@@ -77,8 +86,12 @@ src/
 - **statusline.rs**: Reads from ecosystem tools (git, mycelium, hyphae, canopy, volva) via CLI probes or direct file access. Each data source is an independent segment.
 - **status.rs**: Probe-based ecosystem status checks used by the statusline.
 - **config.rs**: Loads and validates `~/.config/annulus/statusline.toml`; provides defaults when the file is absent.
+- **config_export.rs**: Serializes the resolved config for operator inspection via the CLI.
+- **bridge.rs**: Reads `~/.config/annulus/bridge.json` for transient key-value mode signals with TTL semantics.
+- **notify.rs**: Polls Canopy for unread notifications and optionally delivers them as macOS system notifications.
 - **validate_hooks.rs**: Reads host config files and checks that registered hook paths exist and are executable.
 - **providers/**: Token usage readers for each supported AI provider. `mod.rs` defines the `TokenProvider` trait and auto-detects which provider to use.
+- **usage/**: Usage aggregation, per-provider readers, and persistence.
 
 ---
 
