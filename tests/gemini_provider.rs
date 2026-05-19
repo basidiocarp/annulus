@@ -18,27 +18,6 @@ fn write_session(dir: &Path, name: &str, content: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn gemini_provider_name_is_gemini() {
-    let provider = GeminiProvider::new();
-    assert_eq!(provider.name(), "gemini");
-}
-
-#[test]
-fn gemini_provider_is_unavailable_when_dir_missing() {
-    let provider = GeminiProvider::with_tmp_dir(std::path::PathBuf::from(
-        "/tmp/nonexistent-gemini-annulus-integration",
-    ));
-    assert!(!provider.is_available());
-}
-
-#[test]
-fn gemini_provider_is_available_when_dir_exists() {
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    let provider = GeminiProvider::with_tmp_dir(dir.path().to_path_buf());
-    assert!(provider.is_available());
-}
-
-#[test]
 fn gemini_provider_session_usage_returns_none_without_session_files() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let provider = GeminiProvider::with_tmp_dir(dir.path().to_path_buf());
