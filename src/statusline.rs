@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::bridge::{bridge_path, read_bridge};
-use crate::config::{StatuslineConfig, load_config};
+use crate::config::{StatuslineConfig, SegmentEntry, load_config};
 use crate::providers;
 
 const TIERED_PRICING_THRESHOLD: usize = 200_000;
@@ -174,9 +174,91 @@ fn parse_statusline_input_from_reader<R: Read>(reader: R) -> Result<StatuslineIn
     }
 }
 
+fn resolve_color_code(color: &str) -> Option<&'static str> {
+    match color.trim() {
+        "black" => Some("30"),
+        "red" => Some("31"),
+        "green" => Some("32"),
+        "yellow" => Some("33"),
+        "blue" => Some("34"),
+        "magenta" => Some("35"),
+        "cyan" => Some("36"),
+        "white" => Some("37"),
+        "gray" | "grey" => Some("90"),
+        _ => None,
+    }
+}
+
+struct ConfiguredSegment {
+    segment: Box<dyn Segment>,
+    entry: SegmentEntry,
+}
+
+/// Strip ANSI SGR escape sequences (`ESC[...m`) from a string, returning plain text.
+fn strip_ansi(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next(); // consume '['
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Apply a configured color override to `base_text`.
+///
+/// When color mode is active and the entry specifies a color, strips existing ANSI
+/// from `base_text` and repaints with the configured code. This avoids a second
+/// call to `render()` and the associated I/O for data-backed segments.
+fn apply_color_override(entry: &SegmentEntry, base_text: String, color: bool) -> String {
+    if !color {
+        return base_text;
+    }
+    let Some(color_str) = entry.color.as_deref() else {
+        return base_text;
+    };
+    let code: Option<&str> = resolve_color_code(color_str).or_else(|| {
+        if color_str.chars().all(|c| c.is_ascii_digit() || c == ';') {
+            Some(color_str)
+        } else {
+            eprintln!("annulus: unrecognized segment color '{color_str}' — falling back to default");
+            None
+        }
+    });
+    match code {
+        Some(c) => paint(&strip_ansi(&base_text), c, true),
+        None => base_text,
+    }
+}
+
+/// Collect rendered (and color-overridden) text for all segments on `line_num`.
+fn render_line(
+    segments: &[ConfiguredSegment],
+    line_num: u8,
+    view: &StatuslineView,
+    color: bool,
+) -> Vec<String> {
+    segments
+        .iter()
+        .filter(|s| s.segment.line() == line_num)
+        .filter_map(|s| {
+            let base = s.segment.render(view, color)?;
+            Some(apply_color_override(&s.entry, base, color))
+        })
+        .collect()
+}
+
 fn render_and_print_terminal(view: &StatuslineView, color: bool, config: &StatuslineConfig) {
     let segments = segments_from_config(config);
-    println!("{}", render_statusline(view, color, &segments));
+    println!("{}", render_statusline(view, color, &segments, config.separator.as_str()));
 }
 
 fn render_and_print_json(view: &StatuslineView, config: &StatuslineConfig) -> Result<()> {
@@ -1680,24 +1762,120 @@ impl Segment for DegradationSegment {
 /// is the correct path. This helper exists only so tests can obtain a concrete segment vec without
 /// constructing a full config.
 #[cfg(test)]
-fn default_segments() -> Vec<Box<dyn Segment>> {
+fn default_segments() -> Vec<ConfiguredSegment> {
     vec![
-        Box::new(ContextSegment),
-        Box::new(UsageSegment),
-        Box::new(CostSegment),
-        Box::new(ModelSegment),
-        Box::new(SavingsSegment),
-        Box::new(DegradationSegment),
-        Box::new(BranchSegment),
-        Box::new(WorkspaceSegment),
-        Box::new(ContextBarSegment),
-        Box::new(ContextMetricsSegment),
-        Box::new(HyphaeSegment),
-        Box::new(HeartbeatSegment),
+        ConfiguredSegment {
+            segment: Box::new(ContextSegment),
+            entry: SegmentEntry {
+                name: "context".to_string(),
+                enabled: true,
+                color: None,
+                separator: None,
+            },
+        },
+        ConfiguredSegment {
+            segment: Box::new(UsageSegment),
+            entry: SegmentEntry {
+                name: "usage".to_string(),
+                enabled: true,
+                color: None,
+                separator: None,
+            },
+        },
+        ConfiguredSegment {
+            segment: Box::new(CostSegment),
+            entry: SegmentEntry {
+                name: "cost".to_string(),
+                enabled: true,
+                color: None,
+                separator: None,
+            },
+        },
+        ConfiguredSegment {
+            segment: Box::new(ModelSegment),
+            entry: SegmentEntry {
+                name: "model".to_string(),
+                enabled: true,
+                color: None,
+                separator: None,
+            },
+        },
+        ConfiguredSegment {
+            segment: Box::new(SavingsSegment),
+            entry: SegmentEntry {
+                name: "savings".to_string(),
+                enabled: true,
+                color: None,
+                separator: None,
+            },
+        },
+        ConfiguredSegment {
+            segment: Box::new(DegradationSegment),
+            entry: SegmentEntry {
+                name: "degradation".to_string(),
+                enabled: true,
+                color: None,
+                separator: None,
+            },
+        },
+        ConfiguredSegment {
+            segment: Box::new(BranchSegment),
+            entry: SegmentEntry {
+                name: "branch".to_string(),
+                enabled: true,
+                color: None,
+                separator: None,
+            },
+        },
+        ConfiguredSegment {
+            segment: Box::new(WorkspaceSegment),
+            entry: SegmentEntry {
+                name: "workspace".to_string(),
+                enabled: true,
+                color: None,
+                separator: None,
+            },
+        },
+        ConfiguredSegment {
+            segment: Box::new(ContextBarSegment),
+            entry: SegmentEntry {
+                name: "context-bar".to_string(),
+                enabled: true,
+                color: None,
+                separator: None,
+            },
+        },
+        ConfiguredSegment {
+            segment: Box::new(ContextMetricsSegment),
+            entry: SegmentEntry {
+                name: "context-metrics".to_string(),
+                enabled: true,
+                color: None,
+                separator: None,
+            },
+        },
+        ConfiguredSegment {
+            segment: Box::new(HyphaeSegment),
+            entry: SegmentEntry {
+                name: "hyphae".to_string(),
+                enabled: true,
+                color: None,
+                separator: None,
+            },
+        },
+        ConfiguredSegment {
+            segment: Box::new(HeartbeatSegment),
+            entry: SegmentEntry {
+                name: "heartbeat".to_string(),
+                enabled: true,
+                color: None,
+                separator: None,
+            },
+        },
     ]
 }
 
-fn segments_from_config(config: &StatuslineConfig) -> Vec<Box<dyn Segment>> {
+fn segments_from_config(config: &StatuslineConfig) -> Vec<ConfiguredSegment> {
     // config.segments is always non-empty: load_config() falls back to
     // StatuslineConfig::default() which builds from DEFAULT_SEGMENTS.
     // An empty list here is a caller bug, not a normal case.
@@ -1706,7 +1884,7 @@ fn segments_from_config(config: &StatuslineConfig) -> Vec<Box<dyn Segment>> {
         "segments_from_config called with empty config"
     );
 
-    let mut segments: Vec<Box<dyn Segment>> = vec![];
+    let mut segments: Vec<ConfiguredSegment> = vec![];
     for entry in &config.segments {
         if !entry.enabled {
             continue;
@@ -1731,33 +1909,24 @@ fn segments_from_config(config: &StatuslineConfig) -> Vec<Box<dyn Segment>> {
             _ => None,
         };
         if let Some(seg) = segment {
-            segments.push(seg);
+            segments.push(ConfiguredSegment {
+                segment: seg,
+                entry: entry.clone(),
+            });
         }
     }
 
     segments
 }
 
-fn render_statusline(view: &StatuslineView, color: bool, segments: &[Box<dyn Segment>]) -> String {
-    let line_one: Vec<String> = segments
-        .iter()
-        .filter(|s| s.line() == 1)
-        .filter_map(|s| s.render(view, color))
-        .collect();
-    let line_two: Vec<String> = segments
-        .iter()
-        .filter(|s| s.line() == 2)
-        .filter_map(|s| s.render(view, color))
-        .collect();
+fn render_statusline(view: &StatuslineView, color: bool, segments: &[ConfiguredSegment], separator: &str) -> String {
+    let line_one = render_line(segments, 1, view, color);
+    let line_two = render_line(segments, 2, view, color);
 
-    let line_one = line_one.join(" │ ");
-    let line_two = line_two.join(" │ ");
+    let s1 = line_one.join(separator);
+    let s2 = line_two.join(separator);
 
-    if line_two.is_empty() {
-        line_one
-    } else {
-        format!("{line_one}\n{line_two}")
-    }
+    if s2.is_empty() { s1 } else { format!("{s1}\n{s2}") }
 }
 
 fn build_json_payload(view: &StatuslineView, config: &StatuslineConfig) -> JsonPayload {
@@ -2321,6 +2490,7 @@ mod tests {
             },
             false,
             &segments,
+            " │ ",
         );
 
         // Note: degradation segment is included if unavailable tools are detected
@@ -2349,6 +2519,7 @@ mod tests {
             },
             false,
             &segments,
+            " │ ",
         );
 
         // Note: degradation segment is included if unavailable tools are detected
@@ -3122,7 +3293,7 @@ mod tests {
     #[test]
     fn hyphae_segment_included_in_default_segments() {
         let segments = default_segments();
-        let names: Vec<&str> = segments.iter().map(|s| s.name()).collect();
+        let names: Vec<&str> = segments.iter().map(|s| s.entry.name.as_str()).collect();
         assert!(
             names.contains(&"hyphae"),
             "hyphae should be in default segments"

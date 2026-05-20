@@ -6,6 +6,26 @@ use serde::Deserialize;
 
 const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
 
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SeparatorStyle {
+    #[default]
+    Pipe,
+    Space,
+    None,
+}
+
+impl SeparatorStyle {
+    #[allow(dead_code)]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SeparatorStyle::Pipe => " │ ",
+            SeparatorStyle::Space => "  ",
+            SeparatorStyle::None => "",
+        }
+    }
+}
+
 const KNOWN_PROVIDERS: &[&str] = &["claude", "codex", "gemini"];
 
 /// All segment names accepted by the statusline, including those not in `DEFAULT_SEGMENTS`.
@@ -50,6 +70,13 @@ pub struct SegmentEntry {
     pub name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub color: Option<String>,
+    // Per-segment separator override — wired in a follow-on pass once the global
+    // separator is settled. Declared here so existing configs can include the field.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub separator: Option<SeparatorStyle>,
 }
 
 fn default_true() -> bool {
@@ -66,6 +93,9 @@ struct RawConfig {
     /// When absent, provider auto-detection is used (currently always claude).
     #[serde(default)]
     provider: Option<String>,
+    /// Global separator style used between all segments on the same line.
+    #[serde(default)]
+    separator: SeparatorStyle,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +104,8 @@ pub struct StatuslineConfig {
     pub context_limits: HashMap<String, usize>,
     /// Explicit provider name. `None` means auto-detect (currently claude).
     pub provider: Option<String>,
+    /// Separator string inserted between rendered segments on the same line.
+    pub separator: SeparatorStyle,
 }
 
 impl Default for StatuslineConfig {
@@ -84,10 +116,13 @@ impl Default for StatuslineConfig {
                 .map(|&name| SegmentEntry {
                     name: name.to_string(),
                     enabled: true,
+                    color: None,
+                    separator: None,
                 })
                 .collect(),
             context_limits: HashMap::new(),
             provider: None,
+            separator: SeparatorStyle::default(),
         }
     }
 }
@@ -159,6 +194,7 @@ pub fn load_config() -> StatuslineConfig {
                 segments,
                 context_limits: raw.context_limits,
                 provider: raw.provider,
+                separator: raw.separator,
             }
         }
         Err(e) => {
