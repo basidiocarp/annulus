@@ -29,7 +29,7 @@ impl SeparatorStyle {
 const KNOWN_PROVIDERS: &[&str] = &["claude", "codex", "gemini"];
 
 /// All segment names accepted by the statusline, including those not in `DEFAULT_SEGMENTS`.
-const ALL_SEGMENT_NAMES: &[&str] = &[
+pub const ALL_SEGMENT_NAMES: &[&str] = &[
     "context",
     "usage",
     "cost",

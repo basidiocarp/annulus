@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::bridge::{bridge_path, read_bridge};
-use crate::config::{StatuslineConfig, SegmentEntry, load_config};
+use crate::config::{ALL_SEGMENT_NAMES, StatuslineConfig, SegmentEntry, load_config};
 use crate::providers;
 
 const TIERED_PRICING_THRESHOLD: usize = 200_000;
@@ -163,6 +163,168 @@ pub fn handle_stdin(json: bool, no_color: bool, once: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn handle_preview(no_color: bool, preview_all: bool) {
+    let mut config = load_config();
+
+    if preview_all {
+        let mut existing: std::collections::HashMap<String, SegmentEntry> = config
+            .segments
+            .into_iter()
+            .map(|mut e| {
+                e.enabled = true;
+                (e.name.clone(), e)
+            })
+            .collect();
+        for &name in ALL_SEGMENT_NAMES {
+            existing.entry(name.to_string()).or_insert_with(|| SegmentEntry {
+                name: name.to_string(),
+                enabled: true,
+                color: None,
+                separator: None,
+            });
+        }
+        config.segments = ALL_SEGMENT_NAMES
+            .iter()
+            .filter_map(|&name| existing.remove(name))
+            .collect();
+    }
+
+    let view = mock_statusline_view();
+    let segments = preview_segments_from_config(&config);
+
+    if no_color {
+        println!("annulus statusline preview (mock data)");
+    } else {
+        println!("{}", paint("annulus statusline preview (mock data)", "2", true));
+    }
+
+    println!("{}", render_statusline(&view, !no_color, &segments, config.separator.as_str()));
+
+    let config_path = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".config"))
+        .join("annulus")
+        .join("statusline.toml");
+
+    if config_path.exists() {
+        println!("Config: {}", config_path.display());
+    } else {
+        println!("Config: (not found — using defaults)");
+    }
+}
+
+fn mock_statusline_view() -> StatuslineView {
+    StatuslineView {
+        context_pct: Some(45),
+        prompt_tokens: Some(90_000),
+        context_limit: Some(200_000),
+        usage: Some(TokenUsage {
+            input_tokens: 72_000,
+            output_tokens: 18_000,
+            cache_read_input_tokens: 45_000,
+            cache_creation_input_tokens: 8_000,
+        }),
+        cost: Some(0.083),
+        model_name: "claude-opus-4-7".to_string(),
+        branch: Some("main".to_string()),
+        workspace_name: Some("basidiocarp".to_string()),
+        savings: Some(SavingsStat {
+            saved_tokens: 15_000,
+            input_tokens: 90_000,
+        }),
+        context_metrics: Some(ContextMetricsData {
+            window_pct: 0.45,
+            at_warning: false,
+        }),
+    }
+}
+
+struct MockHyphaeSegment;
+impl Segment for MockHyphaeSegment {
+    fn name(&self) -> &'static str {
+        "hyphae"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    fn render(&self, _view: &StatuslineView, color: bool) -> Option<String> {
+        Some(paint("hy: active", "2", color))
+    }
+}
+
+struct MockHeartbeatSegment;
+impl Segment for MockHeartbeatSegment {
+    fn name(&self) -> &'static str {
+        "heartbeat"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    fn render(&self, _view: &StatuslineView, _color: bool) -> Option<String> {
+        Some("agent: idle".to_string())
+    }
+}
+
+struct MockCortinaSegment;
+impl Segment for MockCortinaSegment {
+    fn name(&self) -> &'static str {
+        "cortina"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    fn render(&self, _view: &StatuslineView, _color: bool) -> Option<String> {
+        Some("cortina: 3 hooks".to_string())
+    }
+}
+
+struct MockCanopyNotificationsSegment;
+impl Segment for MockCanopyNotificationsSegment {
+    fn name(&self) -> &'static str {
+        "canopy-notifications"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    fn render(&self, _view: &StatuslineView, color: bool) -> Option<String> {
+        Some(paint("canopy:2 unread", "33", color))
+    }
+}
+
+fn preview_segments_from_config(config: &StatuslineConfig) -> Vec<ConfiguredSegment> {
+    let mut segments: Vec<ConfiguredSegment> = vec![];
+    for entry in &config.segments {
+        if !entry.enabled {
+            continue;
+        }
+        let segment: Option<Box<dyn Segment>> = match entry.name.as_str() {
+            "context" => Some(Box::new(ContextSegment)),
+            "usage" => Some(Box::new(UsageSegment)),
+            "cost" => Some(Box::new(CostSegment)),
+            "model" => Some(Box::new(ModelSegment)),
+            "savings" => Some(Box::new(SavingsSegment)),
+            "degradation" => Some(Box::new(DegradationSegment)),
+            "branch" => Some(Box::new(BranchSegment)),
+            "workspace" => Some(Box::new(WorkspaceSegment)),
+            "context-bar" => Some(Box::new(ContextBarSegment)),
+            "context-metrics" => Some(Box::new(ContextMetricsSegment)),
+            "hyphae" => Some(Box::new(MockHyphaeSegment)),
+            "heartbeat" => Some(Box::new(MockHeartbeatSegment)),
+            "canopy-adoption" => Some(Box::new(ToolAdoptionSegment)),
+            "canopy-notifications" => Some(Box::new(MockCanopyNotificationsSegment)),
+            "cortina" => Some(Box::new(MockCortinaSegment)),
+            // bridge is a transient signal, intentionally omitted from preview output
+            _ => None,
+        };
+        if let Some(seg) = segment {
+            segments.push(ConfiguredSegment {
+                segment: seg,
+                entry: entry.clone(),
+            });
+        }
+    }
+    segments
 }
 
 fn parse_statusline_input_from_reader<R: Read>(reader: R) -> Result<StatuslineInput> {

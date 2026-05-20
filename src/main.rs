@@ -31,6 +31,12 @@ enum Command {
         /// Render once and exit (skip polling/refresh loops)
         #[arg(long)]
         once: bool,
+        /// Render with mock data and exit — no live session required
+        #[arg(long)]
+        preview: bool,
+        /// Like --preview but forces all segments visible regardless of config
+        #[arg(long)]
+        preview_all: bool,
     },
     /// Show ecosystem availability status
     Status {
@@ -70,7 +76,16 @@ fn main() {
             no_color,
             json,
             once,
-        } => statusline::handle_stdin(json, no_color, once),
+            preview,
+            preview_all,
+        } => {
+            if preview || preview_all {
+                statusline::handle_preview(no_color, preview_all);
+                Ok(())
+            } else {
+                statusline::handle_stdin(json, no_color, once)
+            }
+        }
         Command::Status { json } => {
             if json {
                 println!("{}", status::status_json());
