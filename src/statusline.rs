@@ -16,6 +16,15 @@ use crate::providers;
 const TIERED_PRICING_THRESHOLD: usize = 200_000;
 const DEFAULT_TERMINAL_WIDTH: u16 = 80;
 const MAX_PARENT_WALK: u8 = 8;
+const CACHE_TTL_SECS: u64 = 30;
+
+#[derive(Serialize, Deserialize)]
+struct StatuslineCache {
+    is_updating: bool,
+    pid: u32,
+    output: String,
+    updated_at: u64, // Unix timestamp secs
+}
 
 #[derive(Debug, Default, Deserialize)]
 struct StatuslineInput {
@@ -143,6 +152,74 @@ struct JsonSegment {
     reason: Option<String>,
 }
 
+fn cache_path(session_key: &str) -> PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push("annulus-semaphore");
+    p.push(format!("{session_key}.json"));
+    p
+}
+
+fn read_cache(path: &Path) -> Option<StatuslineCache> {
+    let data = std::fs::read(path).ok()?;
+    serde_json::from_slice(&data).ok()
+}
+
+fn write_cache(path: &Path, cache: &StatuslineCache) {
+    let tmp = path.with_extension("json.tmp");
+    if let Ok(data) = serde_json::to_vec(cache) {
+        if std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).is_ok()
+            && std::fs::write(&tmp, &data).is_ok()
+        {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+}
+
+fn cache_is_fresh(cache: &StatuslineCache) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    now.saturating_sub(cache.updated_at) < CACHE_TTL_SECS
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: kill with signal 0 is a standard liveness probe; no signal is actually
+        // sent, and the call is only used to check if the process exists.
+        #[allow(unsafe_code, clippy::cast_possible_wrap)]
+        unsafe {
+            libc::kill(pid as libc::pid_t, 0) == 0
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true // safe fallback: treat cached output as valid
+    }
+}
+
+/// FNV-1a hash for stable session keys across Rust versions.
+/// No external dependencies — just a simple fold.
+fn fnv1a_hex(s: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in s.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn session_key(input: &StatuslineInput) -> String {
+    let raw = input
+        .transcript_path
+        .as_deref()
+        .or(input.session_path.as_deref())
+        .unwrap_or("default");
+    fnv1a_hex(raw)
+}
+
 pub fn handle_stdin(json: bool, no_color: bool, once: bool) -> Result<()> {
     // `once` is accepted for CI/script compatibility. This function always renders
     // once and returns — there is no polling loop — so the flag has no effect on
@@ -157,14 +234,66 @@ pub fn handle_stdin(json: bool, no_color: bool, once: bool) -> Result<()> {
         parse_statusline_input_from_reader(stdin.lock())?
     };
 
+    // Only cache terminal output, not JSON
+    if json {
+        let config = load_config();
+        let view = statusline_view(input, &config);
+        render_and_print_json(&view, &config)?;
+        return Ok(());
+    }
+
+    // Terminal output: apply cache pattern
+    let key = session_key(&input);
+    let path = cache_path(&key);
+
+    // Check for fresh cache — read once, bind to local variable for both checks
+    let existing = read_cache(&path);
+
+    if let Some(ref cache) = existing {
+        if cache_is_fresh(cache) {
+            print!("{}", &cache.output);
+            return Ok(());
+        }
+        // Check if another process is updating
+        if cache.is_updating && process_is_alive(cache.pid) {
+            print!("{}", &cache.output);
+            return Ok(());
+        }
+    }
+
+    // No valid cache — extract stale output for recovery
+    let stale_output = existing.map(|c| c.output).unwrap_or_default();
+
+    // Get current time once for cache entries
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Mark as updating
+    let updating_cache = StatuslineCache {
+        is_updating: true,
+        pid: std::process::id(),
+        output: stale_output.clone(),
+        updated_at: now_secs,
+    };
+    write_cache(&path, &updating_cache);
+
+    // Render the statusline
     let config = load_config();
     let view = statusline_view(input, &config);
+    let segments = segments_from_config(&config);
+    let output = render_statusline(&view, !no_color, &segments, config.separator.as_str());
 
-    if json {
-        render_and_print_json(&view, &config)?;
-    } else {
-        render_and_print_terminal(&view, !no_color, &config);
-    }
+    // Write the final result
+    let final_cache = StatuslineCache {
+        is_updating: false,
+        pid: std::process::id(),
+        output: output.clone(),
+        updated_at: now_secs,
+    };
+    write_cache(&path, &final_cache);
+    print!("{output}");
 
     Ok(())
 }
@@ -431,14 +560,6 @@ fn render_line(
             Some(apply_color_override(&s.entry, base, color))
         })
         .collect()
-}
-
-fn render_and_print_terminal(view: &StatuslineView, color: bool, config: &StatuslineConfig) {
-    let segments = segments_from_config(config);
-    println!(
-        "{}",
-        render_statusline(view, color, &segments, config.separator.as_str())
-    );
 }
 
 fn render_and_print_json(view: &StatuslineView, config: &StatuslineConfig) -> Result<()> {

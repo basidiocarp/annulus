@@ -29,6 +29,7 @@ dependencies = [
  "clap",
  "dirs",
  "filetime",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
