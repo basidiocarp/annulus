@@ -42,6 +42,7 @@ pub const ALL_SEGMENT_NAMES: &[&str] = &[
     "context-metrics",
     "hyphae",
     "heartbeat",
+    "blocks",
     "bridge",
     "canopy-adoption",
     "canopy-notifications",
@@ -96,6 +97,9 @@ struct RawConfig {
     /// Global separator style used between all segments on the same line.
     #[serde(default)]
     separator: SeparatorStyle,
+    /// Session duration in hours for the blocks segment.
+    #[serde(default)]
+    session_duration_hours: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +110,8 @@ pub struct StatuslineConfig {
     pub provider: Option<String>,
     /// Separator string inserted between rendered segments on the same line.
     pub separator: SeparatorStyle,
+    /// Session duration in hours for the blocks segment.
+    pub session_duration_hours: Option<f64>,
 }
 
 impl Default for StatuslineConfig {
@@ -123,6 +129,7 @@ impl Default for StatuslineConfig {
             context_limits: HashMap::new(),
             provider: None,
             separator: SeparatorStyle::default(),
+            session_duration_hours: None,
         }
     }
 }
@@ -195,6 +202,7 @@ pub fn load_config() -> StatuslineConfig {
                 context_limits: raw.context_limits,
                 provider: raw.provider,
                 separator: raw.separator,
+                session_duration_hours: raw.session_duration_hours,
             }
         }
         Err(e) => {
@@ -248,6 +256,7 @@ mod tests {
                 "heartbeat",
             ]
         );
+        assert_eq!(config.session_duration_hours, None);
     }
 
     #[test]
@@ -382,6 +391,7 @@ enabled = false
             "context-metrics",
             "hyphae",
             "heartbeat",
+            "blocks",
             "bridge",
             "canopy-adoption",
             "canopy-notifications",

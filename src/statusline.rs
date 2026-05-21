@@ -2,7 +2,7 @@ use std::io::{self, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -17,6 +17,7 @@ const TIERED_PRICING_THRESHOLD: usize = 200_000;
 const DEFAULT_TERMINAL_WIDTH: u16 = 80;
 const MAX_PARENT_WALK: u8 = 8;
 const CACHE_TTL_SECS: u64 = 30;
+const DEFAULT_SESSION_DURATION_HOURS: f64 = 5.0;
 
 #[derive(Serialize, Deserialize)]
 struct StatuslineCache {
@@ -84,6 +85,16 @@ struct TranscriptUsage {
     latest_assistant: Option<TokenUsage>,
 }
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct SessionBlock {
+    start: SystemTime,
+    end: SystemTime,
+    token_count: u64,
+    is_active: bool,
+    is_gap: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(
     clippy::struct_field_names,
@@ -124,6 +135,8 @@ struct StatuslineView {
     savings: Option<SavingsStat>,
     context_metrics: Option<ContextMetricsData>,
     terminal_width: u16,
+    session_start: Option<SystemTime>,
+    session_duration_hours: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -355,6 +368,99 @@ pub fn handle_preview(no_color: bool, preview_all: bool) {
     }
 }
 
+/// Identify session blocks from a list of (timestamp, `token_count`) entries.
+///
+/// A session block spans from the first entry in a contiguous group until `start + duration_secs`.
+/// When a gap larger than `duration_secs` is detected, the current block is closed, a gap block is
+/// inserted covering the idle period, and a new block starts. A block's `is_active` flag indicates
+/// the last block is currently ongoing (if the elapsed time since the last entry is less than
+/// `duration_secs` and the block has not yet ended). Gap blocks have `token_count = 0` and
+/// `is_active = false`.
+///
+/// # Arguments
+///
+/// * `entries` - A slice of (timestamp, tokens) tuples. Order is assumed ascending by timestamp.
+/// * `duration_secs` - The maximum duration of a single session block in seconds.
+///
+/// # Returns
+///
+/// A vector of `SessionBlock` structures sorted chronologically.
+#[allow(dead_code)]
+fn identify_session_blocks(entries: &[(SystemTime, u64)], duration_secs: u64) -> Vec<SessionBlock> {
+    if entries.is_empty() {
+        return vec![];
+    }
+
+    let mut blocks = vec![];
+    let mut current_block_start = entries[0].0;
+    let mut current_block_tokens: u64 = 0;
+
+    for (i, (timestamp, tokens)) in entries.iter().enumerate() {
+        // Calculate elapsed time since block start
+        let time_since_start = timestamp.duration_since(current_block_start);
+        // If this is not the first entry, calculate elapsed time since the last entry
+        let time_since_last = if i > 0 {
+            timestamp.duration_since(entries[i - 1].0)
+        } else {
+            Ok(Duration::ZERO)
+        };
+
+        // Check if we need to close the current block
+        let need_new_block = time_since_start.is_ok_and(|d| d.as_secs() > duration_secs)
+            || time_since_last.is_ok_and(|d| d.as_secs() > duration_secs);
+
+        if need_new_block && i > 0 {
+            // Close the current block
+            let block_end = current_block_start + Duration::from_secs(duration_secs);
+            blocks.push(SessionBlock {
+                start: current_block_start,
+                end: block_end,
+                token_count: current_block_tokens,
+                is_active: false,
+                is_gap: false,
+            });
+
+            // Insert a gap block covering the idle period
+            if let Ok(gap_duration) = timestamp.duration_since(block_end) {
+                if gap_duration.as_secs() > 0 {
+                    blocks.push(SessionBlock {
+                        start: block_end,
+                        end: *timestamp,
+                        token_count: 0,
+                        is_active: false,
+                        is_gap: true,
+                    });
+                }
+            }
+
+            // Start a new block at this entry
+            current_block_start = *timestamp;
+            current_block_tokens = *tokens;
+        } else {
+            // Continue the current block, accumulating tokens
+            current_block_tokens = current_block_tokens.saturating_add(*tokens);
+        }
+    }
+
+    // Close the final block
+    let final_block_end = current_block_start + Duration::from_secs(duration_secs);
+    let now = SystemTime::now();
+    let time_since_last_entry = now
+        .duration_since(entries.last().unwrap().0)
+        .unwrap_or_default();
+    let is_active = time_since_last_entry.as_secs() < duration_secs && now < final_block_end;
+
+    blocks.push(SessionBlock {
+        start: current_block_start,
+        end: final_block_end,
+        token_count: current_block_tokens,
+        is_active,
+        is_gap: false,
+    });
+
+    blocks
+}
+
 fn mock_statusline_view() -> StatuslineView {
     StatuslineView {
         context_pct: Some(45),
@@ -379,6 +485,8 @@ fn mock_statusline_view() -> StatuslineView {
             at_warning: false,
         }),
         terminal_width: 120,
+        session_start: Some(SystemTime::now()),
+        session_duration_hours: DEFAULT_SESSION_DURATION_HOURS,
     }
 }
 
@@ -453,6 +561,7 @@ fn preview_segments_from_config(config: &StatuslineConfig) -> Vec<ConfiguredSegm
             "context-metrics" => Some(Box::new(ContextMetricsSegment)),
             "hyphae" => Some(Box::new(MockHyphaeSegment)),
             "heartbeat" => Some(Box::new(MockHeartbeatSegment)),
+            "blocks" => Some(Box::new(BlocksSegment)),
             "canopy-adoption" => Some(Box::new(ToolAdoptionSegment)),
             "canopy-notifications" => Some(Box::new(MockCanopyNotificationsSegment)),
             "cortina" => Some(Box::new(MockCortinaSegment)),
@@ -796,6 +905,13 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
         }
     });
 
+    // Extract session start time from the transcript file's mtime if available
+    let session_start = input
+        .transcript_path
+        .as_deref()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|m| m.modified().ok());
+
     StatuslineView {
         context_pct,
         prompt_tokens,
@@ -808,6 +924,10 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
         savings,
         context_metrics,
         terminal_width: detect_terminal_width(),
+        session_start,
+        session_duration_hours: config
+            .session_duration_hours
+            .unwrap_or(DEFAULT_SESSION_DURATION_HOURS),
     }
 }
 
@@ -2166,6 +2286,90 @@ impl Segment for DegradationSegment {
     }
 }
 
+struct BlocksSegment;
+impl Segment for BlocksSegment {
+    fn name(&self) -> &'static str {
+        "blocks"
+    }
+    fn line(&self) -> u8 {
+        2
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "Session duration is presentation-only and values fit within display ranges"
+    )]
+    fn render(&self, view: &StatuslineView, color: bool) -> Option<String> {
+        // Get token usage data from the view
+        let usage = view.usage?;
+        if !usage.has_data() {
+            return None;
+        }
+
+        // If session_start is not available, return None
+        let session_start = view.session_start?;
+
+        // If no tokens, return None
+        let total_tokens = usage.input_tokens as u64 + usage.output_tokens as u64;
+        if total_tokens == 0 {
+            return None;
+        }
+
+        // Compute elapsed time since session start
+        let now = SystemTime::now();
+        let Ok(elapsed) = now.duration_since(session_start) else {
+            return None;
+        };
+
+        // Compute session duration in seconds
+        let duration_secs = view.session_duration_hours * 3600.0;
+
+        // Check if session is still active
+        let elapsed_secs = elapsed.as_secs_f64();
+        if elapsed_secs >= duration_secs {
+            // Session has ended
+            return None;
+        }
+
+        // Compute remaining time
+        let remaining_secs = duration_secs - elapsed_secs;
+        let remaining_hours = remaining_secs / 3600.0;
+        let remaining_minutes = (remaining_secs % 3600.0) / 60.0;
+
+        let h = remaining_hours as u64;
+        let m = remaining_minutes as u64;
+
+        // Compute burn rate (tokens per hour)
+        let elapsed_hours = elapsed_secs / 3600.0;
+        let burn_rate = total_tokens as f64 / elapsed_hours.max(0.001);
+
+        // Format burn rate with comma separation if > 999
+        let burn_str = if burn_rate > 999.0 {
+            format!("{burn_rate:.0}")
+                .chars()
+                .rev()
+                .enumerate()
+                .flat_map(|(i, c)| {
+                    if i > 0 && i % 3 == 0 {
+                        vec![',', c]
+                    } else {
+                        vec![c]
+                    }
+                })
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>()
+        } else {
+            format!("{burn_rate:.0}")
+        };
+
+        let output = format!("⏱ {h}h {m}m left | 🔥 {burn_str} tok/h");
+        Some(paint(&output, "33", color))
+    }
+}
+
 /// Returns the default segment list for use in tests.
 ///
 /// Production code must not call this — `segments_from_config` with a `StatuslineConfig::default()`
@@ -2312,6 +2516,7 @@ fn segments_from_config(config: &StatuslineConfig) -> Vec<ConfiguredSegment> {
             "context-metrics" => Some(Box::new(ContextMetricsSegment)),
             "hyphae" => Some(Box::new(HyphaeSegment)),
             "heartbeat" => Some(Box::new(HeartbeatSegment)),
+            "blocks" => Some(Box::new(BlocksSegment)),
             "bridge" => Some(Box::new(BridgeSegment)),
             "canopy-adoption" => Some(Box::new(ToolAdoptionSegment)),
             "canopy-notifications" => Some(Box::new(CanopyNotificationsSegment)),
@@ -2908,6 +3113,8 @@ mod tests {
                     at_warning: false,
                 }),
                 terminal_width: 80,
+                session_start: None,
+                session_duration_hours: DEFAULT_SESSION_DURATION_HOURS,
             },
             false,
             &segments,
@@ -2938,6 +3145,8 @@ mod tests {
                 savings: None,
                 context_metrics: None,
                 terminal_width: 80,
+                session_start: None,
+                session_duration_hours: DEFAULT_SESSION_DURATION_HOURS,
             },
             false,
             &segments,
@@ -3091,6 +3300,8 @@ mod tests {
             savings: None,
             context_metrics: None,
             terminal_width: 80,
+            session_start: None,
+            session_duration_hours: DEFAULT_SESSION_DURATION_HOURS,
         }
     }
 
@@ -3163,6 +3374,8 @@ mod tests {
                 at_warning: false,
             }),
             terminal_width: 80,
+            session_start: None,
+            session_duration_hours: DEFAULT_SESSION_DURATION_HOURS,
         };
         let config = StatuslineConfig::default();
         let payload = build_json_payload(&view, &config);
@@ -3243,6 +3456,8 @@ mod tests {
             savings: None,
             context_metrics: None,
             terminal_width: 80,
+            session_start: None,
+            session_duration_hours: DEFAULT_SESSION_DURATION_HOURS,
         };
         let config = StatuslineConfig::default();
         let payload = build_json_payload(&view, &config);
@@ -4176,5 +4391,49 @@ mod tests {
             width1, width2,
             "terminal width detection should be consistent"
         );
+    }
+
+    #[test]
+    fn identify_session_blocks_empty_input() {
+        let entries: Vec<(SystemTime, u64)> = vec![];
+        let blocks = identify_session_blocks(&entries, 18000);
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn identify_session_blocks_single_entry() {
+        let now = SystemTime::now();
+        let entries = vec![(now, 1000)];
+        let blocks = identify_session_blocks(&entries, 18000);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].token_count, 1000);
+        assert!(blocks[0].is_active);
+        assert!(!blocks[0].is_gap);
+    }
+
+    #[test]
+    fn identify_session_blocks_two_entries_6_hours_apart() {
+        let base = SystemTime::now();
+        let six_hours_later = base + Duration::from_secs(6 * 3600);
+        let entries = vec![(base, 1000), (six_hours_later, 2000)];
+        let blocks = identify_session_blocks(&entries, 5 * 3600); // 5-hour duration
+        // Should have: closed first block, gap block, active second block
+        assert!(blocks.len() >= 2);
+        // First block should be closed (not active)
+        assert!(!blocks[0].is_active);
+        // Last block should be active
+        assert!(blocks[blocks.len() - 1].is_active);
+    }
+
+    #[test]
+    fn identify_session_blocks_entries_spanning_duration() {
+        let base = SystemTime::now();
+        let after_6h = base + Duration::from_secs(6 * 3600);
+        let entries = vec![(base, 1000), (after_6h, 2000)];
+        let blocks = identify_session_blocks(&entries, 5 * 3600); // 5-hour duration
+        // Verify blocks are in chronological order
+        for i in 0..blocks.len() - 1 {
+            assert!(blocks[i].start <= blocks[i + 1].start);
+        }
     }
 }
