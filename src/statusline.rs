@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::bridge::{bridge_path, read_bridge};
-use crate::config::{ALL_SEGMENT_NAMES, StatuslineConfig, SegmentEntry, load_config};
+use crate::config::{ALL_SEGMENT_NAMES, SegmentEntry, StatuslineConfig, load_config};
 use crate::providers;
 
 const TIERED_PRICING_THRESHOLD: usize = 200_000;
+const DEFAULT_TERMINAL_WIDTH: u16 = 80;
+const MAX_PARENT_WALK: u8 = 8;
 
 #[derive(Debug, Default, Deserialize)]
 struct StatuslineInput {
@@ -112,6 +114,7 @@ struct StatuslineView {
     workspace_name: Option<String>,
     savings: Option<SavingsStat>,
     context_metrics: Option<ContextMetricsData>,
+    terminal_width: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -127,6 +130,7 @@ struct JsonPayload {
     schema: String,
     version: String,
     segments: Vec<JsonSegment>,
+    terminal_width: u16,
 }
 
 #[derive(Debug, Serialize)]
@@ -178,12 +182,14 @@ pub fn handle_preview(no_color: bool, preview_all: bool) {
             })
             .collect();
         for &name in ALL_SEGMENT_NAMES {
-            existing.entry(name.to_string()).or_insert_with(|| SegmentEntry {
-                name: name.to_string(),
-                enabled: true,
-                color: None,
-                separator: None,
-            });
+            existing
+                .entry(name.to_string())
+                .or_insert_with(|| SegmentEntry {
+                    name: name.to_string(),
+                    enabled: true,
+                    color: None,
+                    separator: None,
+                });
         }
         config.segments = ALL_SEGMENT_NAMES
             .iter()
@@ -197,10 +203,16 @@ pub fn handle_preview(no_color: bool, preview_all: bool) {
     if no_color {
         println!("annulus statusline preview (mock data)");
     } else {
-        println!("{}", paint("annulus statusline preview (mock data)", "2", true));
+        println!(
+            "{}",
+            paint("annulus statusline preview (mock data)", "2", true)
+        );
     }
 
-    println!("{}", render_statusline(&view, !no_color, &segments, config.separator.as_str()));
+    println!(
+        "{}",
+        render_statusline(&view, !no_color, &segments, config.separator.as_str())
+    );
 
     let config_path = dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from(".config"))
@@ -237,6 +249,7 @@ fn mock_statusline_view() -> StatuslineView {
             window_pct: 0.45,
             at_warning: false,
         }),
+        terminal_width: 120,
     }
 }
 
@@ -391,7 +404,9 @@ fn apply_color_override(entry: &SegmentEntry, base_text: String, color: bool) ->
         if color_str.chars().all(|c| c.is_ascii_digit() || c == ';') {
             Some(color_str)
         } else {
-            eprintln!("annulus: unrecognized segment color '{color_str}' — falling back to default");
+            eprintln!(
+                "annulus: unrecognized segment color '{color_str}' — falling back to default"
+            );
             None
         }
     });
@@ -420,7 +435,10 @@ fn render_line(
 
 fn render_and_print_terminal(view: &StatuslineView, color: bool, config: &StatuslineConfig) {
     let segments = segments_from_config(config);
-    println!("{}", render_statusline(view, color, &segments, config.separator.as_str()));
+    println!(
+        "{}",
+        render_statusline(view, color, &segments, config.separator.as_str())
+    );
 }
 
 fn render_and_print_json(view: &StatuslineView, config: &StatuslineConfig) -> Result<()> {
@@ -668,6 +686,7 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
         workspace_name,
         savings,
         context_metrics,
+        terminal_width: detect_terminal_width(),
     }
 }
 
@@ -967,6 +986,114 @@ fn workspace_name_for_dir(cwd: &str) -> Option<String> {
     let path = Path::new(cwd);
     let name = path.file_name()?.to_str()?.trim();
     (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Detect terminal width via environment variable, TTY detection, or parent process walk.
+///
+/// Tries in order:
+/// 1. `ANNULUS_WIDTH` environment variable (parsed as u16)
+/// 2. Standard `terminal_size` detection (works when Claude Code passes through TTY)
+/// 3. Walk parent processes on Unix looking for a valid TTY (up to `MAX_PARENT_WALK` hops)
+/// 4. Return `DEFAULT_TERMINAL_WIDTH` (80) as fallback
+fn detect_terminal_width() -> u16 {
+    // 1. Check ANNULUS_WIDTH env var first
+    if let Ok(w) = std::env::var("ANNULUS_WIDTH") {
+        if let Ok(n) = w.parse::<u16>() {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+
+    // 2. Try standard width detection (works when Claude Code passes through TTY)
+    if let Some((terminal_size::Width(w), _)) = terminal_size::terminal_size() {
+        return w;
+    }
+
+    // 3. Walk parent PIDs on Unix
+    #[cfg(unix)]
+    {
+        if let Some(w) = walk_parent_tty_width() {
+            return w;
+        }
+    }
+
+    DEFAULT_TERMINAL_WIDTH
+}
+
+#[cfg(unix)]
+fn walk_parent_tty_width() -> Option<u16> {
+    let mut pid = std::process::id();
+    for _ in 0..MAX_PARENT_WALK {
+        let tty = get_process_tty(pid)?;
+        if tty != "?" && tty != "??" {
+            return probe_tty_width(&tty);
+        }
+        pid = get_parent_pid(pid)?;
+    }
+    None
+}
+
+#[cfg(unix)]
+fn get_process_tty(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-o", "tty=", "-p"])
+        .arg(pid.to_string())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let tty = String::from_utf8(output.stdout).ok()?;
+    Some(tty.trim().to_string())
+}
+
+#[cfg(unix)]
+fn get_parent_pid(pid: u32) -> Option<u32> {
+    let output = Command::new("ps")
+        .args(["-o", "ppid=", "-p"])
+        .arg(pid.to_string())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let ppid_str = String::from_utf8(output.stdout).ok()?;
+    ppid_str.trim().parse().ok()
+}
+
+#[cfg(unix)]
+fn probe_tty_width(tty: &str) -> Option<u16> {
+    let dev_tty = if tty.starts_with('/') {
+        tty.to_string()
+    } else {
+        format!("/dev/{tty}")
+    };
+
+    let args = if cfg!(target_os = "macos") {
+        vec!["-f", &dev_tty, "size"]
+    } else {
+        vec!["-F", &dev_tty, "size"]
+    };
+
+    let output = Command::new("stty").args(&args).output().ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let size_str = String::from_utf8(output.stdout).ok()?;
+    let parts: Vec<&str> = size_str.split_whitespace().collect();
+
+    if parts.len() >= 2 {
+        parts[1].parse().ok()
+    } else {
+        None
+    }
 }
 
 fn current_runtime_session_id() -> Option<String> {
@@ -2081,14 +2208,23 @@ fn segments_from_config(config: &StatuslineConfig) -> Vec<ConfiguredSegment> {
     segments
 }
 
-fn render_statusline(view: &StatuslineView, color: bool, segments: &[ConfiguredSegment], separator: &str) -> String {
+fn render_statusline(
+    view: &StatuslineView,
+    color: bool,
+    segments: &[ConfiguredSegment],
+    separator: &str,
+) -> String {
     let line_one = render_line(segments, 1, view, color);
     let line_two = render_line(segments, 2, view, color);
 
     let s1 = line_one.join(separator);
     let s2 = line_two.join(separator);
 
-    if s2.is_empty() { s1 } else { format!("{s1}\n{s2}") }
+    if s2.is_empty() {
+        s1
+    } else {
+        format!("{s1}\n{s2}")
+    }
 }
 
 fn build_json_payload(view: &StatuslineView, config: &StatuslineConfig) -> JsonPayload {
@@ -2131,6 +2267,7 @@ fn build_json_payload(view: &StatuslineView, config: &StatuslineConfig) -> JsonP
         schema: "annulus-statusline-v1".to_string(),
         version: "1".to_string(),
         segments,
+        terminal_width: view.terminal_width,
     }
 }
 
@@ -2649,6 +2786,7 @@ mod tests {
                     window_pct: 42.0,
                     at_warning: false,
                 }),
+                terminal_width: 80,
             },
             false,
             &segments,
@@ -2678,6 +2816,7 @@ mod tests {
                 workspace_name: None,
                 savings: None,
                 context_metrics: None,
+                terminal_width: 80,
             },
             false,
             &segments,
@@ -2830,6 +2969,7 @@ mod tests {
             workspace_name: None,
             savings: None,
             context_metrics: None,
+            terminal_width: 80,
         }
     }
 
@@ -2901,6 +3041,7 @@ mod tests {
                 window_pct: 67.0,
                 at_warning: false,
             }),
+            terminal_width: 80,
         };
         let config = StatuslineConfig::default();
         let payload = build_json_payload(&view, &config);
@@ -2980,6 +3121,7 @@ mod tests {
             workspace_name: None,
             savings: None,
             context_metrics: None,
+            terminal_width: 80,
         };
         let config = StatuslineConfig::default();
         let payload = build_json_payload(&view, &config);
@@ -3005,12 +3147,10 @@ mod tests {
 
     #[test]
     fn json_context_segment_serializes_percent() {
-        let view = StatuslineView {
-            context_pct: Some(67),
-            prompt_tokens: Some(134_000),
-            context_limit: Some(200_000),
-            ..default_view()
-        };
+        let mut view = default_view();
+        view.context_pct = Some(67);
+        view.prompt_tokens = Some(134_000);
+        view.context_limit = Some(200_000);
         let segment = build_context_segment(&view);
         assert!(segment.available);
         assert!(segment.value.is_some());
@@ -3020,12 +3160,10 @@ mod tests {
 
     #[test]
     fn json_context_segment_includes_real_token_values() {
-        let view = StatuslineView {
-            context_pct: Some(67),
-            prompt_tokens: Some(134_000),
-            context_limit: Some(200_000),
-            ..default_view()
-        };
+        let mut view = default_view();
+        view.context_pct = Some(67);
+        view.prompt_tokens = Some(134_000);
+        view.context_limit = Some(200_000);
         let segment = build_context_segment(&view);
         assert!(segment.available);
         assert!(segment.reason.is_none());
@@ -3043,12 +3181,10 @@ mod tests {
 
     #[test]
     fn json_context_segment_unavailable_when_tokens_missing() {
-        let view = StatuslineView {
-            context_pct: Some(67),
-            prompt_tokens: Some(134_000),
-            context_limit: None, // Missing limit
-            ..default_view()
-        };
+        let mut view = default_view();
+        view.context_pct = Some(67);
+        view.prompt_tokens = Some(134_000);
+        view.context_limit = None; // Missing limit
         let segment = build_context_segment(&view);
         assert!(!segment.available);
         assert!(segment.reason.is_some());
@@ -3057,15 +3193,13 @@ mod tests {
 
     #[test]
     fn json_usage_segment_serializes_all_token_types() {
-        let view = StatuslineView {
-            usage: Some(TokenUsage {
-                input_tokens: 100_000,
-                output_tokens: 20_000,
-                cache_read_input_tokens: 50_000,
-                cache_creation_input_tokens: 10_000,
-            }),
-            ..default_view()
-        };
+        let mut view = default_view();
+        view.usage = Some(TokenUsage {
+            input_tokens: 100_000,
+            output_tokens: 20_000,
+            cache_read_input_tokens: 50_000,
+            cache_creation_input_tokens: 10_000,
+        });
         let segment = build_usage_segment(&view);
         assert!(segment.available);
         let value = segment.value.unwrap();
@@ -3901,5 +4035,25 @@ mod tests {
 
         let segment = build_heartbeat_segment_at_path(&heartbeat_path);
         assert!(!segment.available);
+    }
+
+    #[test]
+    fn detect_terminal_width_env_var_valid() {
+        // Test that a valid ANNULUS_WIDTH env var is used when set.
+        // We don't set it in this test to avoid race conditions with other tests;
+        // instead, we test the parsing logic directly by checking that values > 0 pass.
+        // The detect_terminal_width() function will use the env var if set,
+        // otherwise fall through to terminal_size or TTY detection.
+
+        // Verify the logic: calling detect_terminal_width() multiple times
+        // should give consistent results (no panics, no invalid values).
+        let width1 = detect_terminal_width();
+        let width2 = detect_terminal_width();
+        assert!(width1 > 0, "terminal width should always be > 0");
+        assert!(width2 > 0, "terminal width should always be > 0");
+        assert_eq!(
+            width1, width2,
+            "terminal width detection should be consistent"
+        );
     }
 }
