@@ -8,6 +8,7 @@ mod statusline;
 mod validate_hooks;
 
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
 
 #[derive(Parser)]
 #[command(name = "annulus")]
@@ -79,6 +80,10 @@ fn main() {
             preview,
             preview_all,
         } => {
+            let no_color = no_color
+                || std::env::var("NO_COLOR").is_ok()
+                || std::env::var("TERM").as_deref() == Ok("dumb")
+                || !std::io::stdout().is_terminal();
             if preview || preview_all {
                 statusline::handle_preview(no_color, preview_all);
                 Ok(())
