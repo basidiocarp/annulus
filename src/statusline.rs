@@ -1,10 +1,11 @@
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, BufRead, BufReader, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
+use chrono::DateTime;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -786,6 +787,38 @@ fn build_provider_by_name(
     }
 }
 
+/// Extract session start time from the first event in a transcript file.
+///
+/// Scans the first 50 lines of an NDJSON transcript for a JSON object with a
+/// `timestamp` field (expected in ISO 8601 format). Falls back to file mtime
+/// if the file cannot be read, parsed, or no timestamp field is found.
+///
+/// All errors are silent — the function always returns Option<SystemTime>.
+fn session_start_from_transcript(transcript_path: &str) -> Option<SystemTime> {
+    let file = std::fs::File::open(transcript_path).ok()?;
+    let reader = BufReader::new(file);
+
+    for line in reader.lines().take(50) {
+        let Ok(line) = line else { break };
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { continue };
+        if let Some(ts) = v.get("timestamp").and_then(Value::as_str) {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
+                if let Ok(secs) = u64::try_from(dt.timestamp()) {
+                    let nanos = u64::from(dt.timestamp_subsec_nanos());
+                    return Some(
+                        SystemTime::UNIX_EPOCH
+                            + Duration::from_secs(secs)
+                            + Duration::from_nanos(nanos),
+                    );
+                }
+                // pre-epoch: continue scanning for a later valid timestamp
+            }
+        }
+    }
+
+    None
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "Statusline view aggregates multiple data sources"
@@ -905,12 +938,21 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
         }
     });
 
-    // Extract session start time from the transcript file's mtime if available
+    // Extract session start time: try first event timestamp, fall back to mtime
     let session_start = input
         .transcript_path
         .as_deref()
-        .and_then(|path| std::fs::metadata(path).ok())
-        .and_then(|m| m.modified().ok());
+        .and_then(|path| {
+            // Try to extract from first event's timestamp field
+            session_start_from_transcript(path)
+                .or_else(|| {
+                    tracing::warn!(path = %path, "session_start: no timestamp found in transcript, falling back to mtime");
+                    // Fall back to file mtime if transcript parsing fails
+                    std::fs::metadata(path)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                })
+        });
 
     StatuslineView {
         context_pct,
@@ -4435,5 +4477,111 @@ mod tests {
         for i in 0..blocks.len() - 1 {
             assert!(blocks[i].start <= blocks[i + 1].start);
         }
+    }
+
+    // ── session_start_from_transcript tests ─────────────────────────────────
+
+    #[test]
+    fn session_start_from_transcript_empty_file_returns_none() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let transcript = temp_dir.path().join("empty.jsonl");
+        fs::write(&transcript, "").unwrap();
+
+        let result = session_start_from_transcript(transcript.to_str().unwrap());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn session_start_from_transcript_no_timestamp_field_returns_none() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let transcript = temp_dir.path().join("no-ts.jsonl");
+        fs::write(&transcript, r#"{"type":"user","content":"hello"}"#).unwrap();
+
+        let result = session_start_from_transcript(transcript.to_str().unwrap());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn session_start_from_transcript_valid_rfc3339_first_line() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let transcript = temp_dir.path().join("valid.jsonl");
+        fs::write(
+            &transcript,
+            r#"{"type":"user","timestamp":"2025-05-22T10:30:00Z"}"#,
+        )
+        .unwrap();
+
+        let result = session_start_from_transcript(transcript.to_str().unwrap());
+        assert!(result.is_some());
+        // The timestamp should be exactly 2025-05-22T10:30:00Z
+        let expected = DateTime::parse_from_rfc3339("2025-05-22T10:30:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let system_time = result.unwrap();
+        let duration = system_time
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let expected_duration = Duration::from_secs(expected.timestamp() as u64);
+        // Allow 1 second tolerance for subsecond precision
+        assert!(duration.as_secs().abs_diff(expected_duration.as_secs()) <= 1);
+    }
+
+    #[test]
+    fn session_start_from_transcript_scans_second_line_with_no_timestamp_first() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let transcript = temp_dir.path().join("scan.jsonl");
+        fs::write(
+            &transcript,
+            r#"{"type":"system"}
+{"type":"user","timestamp":"2025-05-22T11:45:00Z"}"#,
+        )
+        .unwrap();
+
+        let result = session_start_from_transcript(transcript.to_str().unwrap());
+        assert!(result.is_some());
+        // Should find the timestamp on the second line
+        let expected = DateTime::parse_from_rfc3339("2025-05-22T11:45:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let system_time = result.unwrap();
+        let duration = system_time
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let expected_duration = Duration::from_secs(expected.timestamp() as u64);
+        assert!(duration.as_secs().abs_diff(expected_duration.as_secs()) <= 1);
+    }
+
+    #[test]
+    fn session_start_from_transcript_pre_epoch_timestamp_returns_none() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let transcript = temp_dir.path().join("pre-epoch.jsonl");
+        // 1950-01-01 is before UNIX epoch (1970-01-01)
+        fs::write(
+            &transcript,
+            r#"{"type":"user","timestamp":"1950-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        let result = session_start_from_transcript(transcript.to_str().unwrap());
+        // Should gracefully return None for pre-epoch timestamps
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn session_start_from_transcript_pre_epoch_on_first_line_still_finds_later_valid_timestamp() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let transcript = temp_dir.path().join("pre-epoch-then-valid.jsonl");
+        fs::write(
+            &transcript,
+            "{\"type\":\"user\",\"timestamp\":\"1950-01-01T00:00:00Z\"}\n{\"type\":\"assistant\",\"timestamp\":\"2025-06-01T10:00:00Z\"}",
+        )
+        .unwrap();
+
+        let result = session_start_from_transcript(transcript.to_str().unwrap());
+        // Pre-epoch on line 1 must not abort the scan; the valid timestamp on line 2 should be found
+        assert!(result.is_some());
+        let duration = result.unwrap().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let expected = DateTime::parse_from_rfc3339("2025-06-01T10:00:00Z").unwrap();
+        assert_eq!(duration.as_secs(), expected.timestamp() as u64);
     }
 }
