@@ -1788,12 +1788,17 @@ fn cortina_session_status_at_path(temp_dir: &Path) -> CortinaStatus {
             if name_str.starts_with("cortina-session-") && name_str.ends_with(".json") {
                 // Get metadata for modification time
                 if let Ok(metadata) = std::fs::metadata(&path) {
-                    session_files.push((
-                        path,
-                        metadata
-                            .modified()
-                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-                    ));
+                    if let Ok(mtime) = metadata.modified() {
+                        // Skip files older than 10 minutes. On clock-skew elapsed() returns
+                        // Err, which ok() converts to None — file is silently excluded (safe).
+                        let is_recent = mtime
+                            .elapsed()
+                            .ok()
+                            .is_some_and(|elapsed| elapsed.as_secs() < 600); // 10 minutes
+                        if is_recent {
+                            session_files.push((path, mtime));
+                        }
+                    }
                 }
             }
         }
