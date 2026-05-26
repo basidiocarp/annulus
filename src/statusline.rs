@@ -387,9 +387,9 @@ pub fn handle_preview(no_color: bool, preview_all: bool) {
 ///
 /// A vector of `SessionBlock` structures sorted chronologically.
 #[allow(dead_code)]
-fn identify_session_blocks(entries: &[(SystemTime, u64)], duration_secs: u64) -> Vec<SessionBlock> {
+fn identify_session_blocks(entries: &[(SystemTime, u64)], duration_secs: u64) -> Option<Vec<SessionBlock>> {
     if entries.is_empty() {
-        return vec![];
+        return Some(vec![]);
     }
 
     let mut blocks = vec![];
@@ -447,7 +447,7 @@ fn identify_session_blocks(entries: &[(SystemTime, u64)], duration_secs: u64) ->
     let final_block_end = current_block_start + Duration::from_secs(duration_secs);
     let now = SystemTime::now();
     let time_since_last_entry = now
-        .duration_since(entries.last().unwrap().0)
+        .duration_since(entries.last()?.0)
         .unwrap_or_default();
     let is_active = time_since_last_entry.as_secs() < duration_secs && now < final_block_end;
 
@@ -459,7 +459,7 @@ fn identify_session_blocks(entries: &[(SystemTime, u64)], duration_secs: u64) ->
         is_gap: false,
     });
 
-    blocks
+    Some(blocks)
 }
 
 fn mock_statusline_view() -> StatuslineView {
@@ -4443,7 +4443,7 @@ mod tests {
     #[test]
     fn identify_session_blocks_empty_input() {
         let entries: Vec<(SystemTime, u64)> = vec![];
-        let blocks = identify_session_blocks(&entries, 18000);
+        let blocks = identify_session_blocks(&entries, 18000).expect("should not be None");
         assert!(blocks.is_empty());
     }
 
@@ -4451,7 +4451,7 @@ mod tests {
     fn identify_session_blocks_single_entry() {
         let now = SystemTime::now();
         let entries = vec![(now, 1000)];
-        let blocks = identify_session_blocks(&entries, 18000);
+        let blocks = identify_session_blocks(&entries, 18000).expect("should not be None");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].token_count, 1000);
         assert!(blocks[0].is_active);
@@ -4463,7 +4463,7 @@ mod tests {
         let base = SystemTime::now();
         let six_hours_later = base + Duration::from_secs(6 * 3600);
         let entries = vec![(base, 1000), (six_hours_later, 2000)];
-        let blocks = identify_session_blocks(&entries, 5 * 3600); // 5-hour duration
+        let blocks = identify_session_blocks(&entries, 5 * 3600).expect("should not be None"); // 5-hour duration
         // Should have: closed first block, gap block, active second block
         assert!(blocks.len() >= 2);
         // First block should be closed (not active)
@@ -4477,7 +4477,7 @@ mod tests {
         let base = SystemTime::now();
         let after_6h = base + Duration::from_secs(6 * 3600);
         let entries = vec![(base, 1000), (after_6h, 2000)];
-        let blocks = identify_session_blocks(&entries, 5 * 3600); // 5-hour duration
+        let blocks = identify_session_blocks(&entries, 5 * 3600).expect("should not be None"); // 5-hour duration
         // Verify blocks are in chronological order
         for i in 0..blocks.len() - 1 {
             assert!(blocks[i].start <= blocks[i + 1].start);
