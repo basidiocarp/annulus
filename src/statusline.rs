@@ -18,6 +18,9 @@ const TIERED_PRICING_THRESHOLD: usize = 200_000;
 const DEFAULT_TERMINAL_WIDTH: u16 = 80;
 const MAX_PARENT_WALK: u8 = 8;
 const CACHE_TTL_SECS: u64 = 30;
+// Sentinel files older than this are treated as stale even when is_updating=true,
+// so a crashed updater cannot suppress rendering for the full CACHE_TTL_SECS window.
+const SENTINEL_STALE_SECS: u64 = 5;
 const DEFAULT_SESSION_DURATION_HOURS: f64 = 5.0;
 
 #[derive(Serialize, Deserialize)]
@@ -270,8 +273,20 @@ pub fn handle_stdin(json: bool, no_color: bool, once: bool) -> Result<()> {
         }
         // Check if another process is updating
         if cache.is_updating && process_is_alive(cache.pid) {
-            print!("{}", &cache.output);
-            return Ok(());
+            // `path` is the cache file; its mtime reflects the last write_cache call, which
+            // happens when the updater sets is_updating=true. If more than SENTINEL_STALE_SECS
+            // have elapsed since that write, the updater likely crashed before clearing the flag.
+            // On clock regression, elapsed() returns Err and is_stale defaults to false
+            // (the conservative direction: suppress rendering rather than risk a double-render).
+            let is_stale = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|mtime| mtime.elapsed().ok())
+                .is_some_and(|elapsed| elapsed.as_secs() > SENTINEL_STALE_SECS);
+            if !is_stale {
+                print!("{}", &cache.output);
+                return Ok(());
+            }
         }
     }
 
