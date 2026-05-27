@@ -2,7 +2,7 @@ use std::io::{self, BufRead, BufReader, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use chrono::DateTime;
@@ -1321,15 +1321,22 @@ fn detect_terminal_width() -> u16 {
 
 #[cfg(unix)]
 fn walk_parent_tty_width() -> Option<u16> {
-    let mut pid = std::process::id();
-    for _ in 0..MAX_PARENT_WALK {
-        let tty = get_process_tty(pid)?;
-        if tty != "?" && tty != "??" {
-            return probe_tty_width(&tty);
+    static TTY_WALK_CACHE: OnceLock<Option<u16>> = OnceLock::new();
+    *TTY_WALK_CACHE.get_or_init(|| {
+        let deadline = Instant::now() + Duration::from_millis(150);
+        let mut pid = std::process::id();
+        for _ in 0..MAX_PARENT_WALK {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            let tty = get_process_tty(pid)?;
+            if tty != "?" && tty != "??" {
+                return probe_tty_width(&tty);
+            }
+            pid = get_parent_pid(pid)?;
         }
-        pid = get_parent_pid(pid)?;
-    }
-    None
+        None
+    })
 }
 
 #[cfg(unix)]
@@ -4603,5 +4610,16 @@ mod tests {
         let duration = result.unwrap().duration_since(SystemTime::UNIX_EPOCH).unwrap();
         let expected = DateTime::parse_from_rfc3339("2025-06-01T10:00:00Z").unwrap();
         assert_eq!(duration.as_secs(), expected.timestamp() as u64);
+    }
+
+    // ── walk_parent_tty_width cache tests ────────────────────────────────────
+
+    #[test]
+    #[cfg(unix)]
+    fn walk_parent_tty_width_cache_is_idempotent() {
+        // Call walk_parent_tty_width twice and verify both calls return the same cached value
+        let first_call = walk_parent_tty_width();
+        let second_call = walk_parent_tty_width();
+        assert_eq!(first_call, second_call, "cache should return consistent results");
     }
 }
