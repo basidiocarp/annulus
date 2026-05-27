@@ -558,7 +558,34 @@ impl Segment for MockCanopyNotificationsSegment {
     }
 }
 
+struct UnknownPlaceholderSegment {
+    name: String,
+}
+impl Segment for UnknownPlaceholderSegment {
+    fn name(&self) -> &'static str {
+        "unknown"
+    }
+    fn line(&self) -> u8 {
+        1
+    }
+    fn render(&self, _view: &StatuslineView, _color: bool) -> Option<String> {
+        Some(format!("[?{}]", self.name))
+    }
+}
+
 fn preview_segments_from_config(config: &StatuslineConfig) -> Vec<ConfiguredSegment> {
+    if config.parse_error {
+        return vec![ConfiguredSegment {
+            segment: Box::new(ConfigErrorSegment),
+            entry: SegmentEntry {
+                name: "config-error".to_string(),
+                enabled: true,
+                color: None,
+                separator: None,
+            },
+        }];
+    }
+
     let mut segments: Vec<ConfiguredSegment> = vec![];
     for entry in &config.segments {
         if !entry.enabled {
@@ -581,8 +608,11 @@ fn preview_segments_from_config(config: &StatuslineConfig) -> Vec<ConfiguredSegm
             "canopy-adoption" => Some(Box::new(ToolAdoptionSegment)),
             "canopy-notifications" => Some(Box::new(MockCanopyNotificationsSegment)),
             "cortina" => Some(Box::new(MockCortinaSegment)),
-            // bridge is a transient signal, intentionally omitted from preview output
-            _ => None,
+            // bridge is a transient signal — no mock available, silently omitted from preview
+            "bridge" => None,
+            _ => Some(Box::new(UnknownPlaceholderSegment {
+                name: entry.name.clone(),
+            })),
         };
         if let Some(seg) = segment {
             segments.push(ConfiguredSegment {
@@ -1596,6 +1626,21 @@ fn tool_adoption_stat_at_path(path: &Path) -> Option<ToolAdoptionStat> {
         }
     };
     conn.busy_timeout(Duration::from_millis(500)).ok()?;
+
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='tool_adoption_scores'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .is_some();
+    if !table_exists {
+        return None;
+    }
+
     let json_str = conn
         .query_row(
             "SELECT score_json FROM tool_adoption_scores ORDER BY rowid DESC LIMIT 1",
@@ -1630,6 +1675,21 @@ fn canopy_unread_count_at_path(path: &Path) -> Option<u32> {
 
     let conn = Connection::open(path).ok()?;
     conn.busy_timeout(Duration::from_millis(500)).ok()?;
+
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='notifications'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .is_some();
+    if !table_exists {
+        return None;
+    }
+
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM notifications WHERE seen = 0",
@@ -2213,6 +2273,19 @@ impl Segment for BridgeSegment {
     }
 }
 
+struct ConfigErrorSegment;
+impl Segment for ConfigErrorSegment {
+    fn name(&self) -> &'static str {
+        "config-error"
+    }
+    fn line(&self) -> u8 {
+        1
+    }
+    fn render(&self, _view: &StatuslineView, _color: bool) -> Option<String> {
+        Some("[cfg!]".to_string())
+    }
+}
+
 struct CortinaSegment;
 impl Segment for CortinaSegment {
     fn name(&self) -> &'static str {
@@ -2566,6 +2639,18 @@ fn segments_from_config(config: &StatuslineConfig) -> Vec<ConfiguredSegment> {
         !config.segments.is_empty(),
         "segments_from_config called with empty config"
     );
+
+    if config.parse_error {
+        return vec![ConfiguredSegment {
+            segment: Box::new(ConfigErrorSegment),
+            entry: SegmentEntry {
+                name: "config-error".to_string(),
+                enabled: true,
+                color: None,
+                separator: None,
+            },
+        }];
+    }
 
     let mut segments: Vec<ConfiguredSegment> = vec![];
     for entry in &config.segments {
@@ -4621,5 +4706,131 @@ mod tests {
         let first_call = walk_parent_tty_width();
         let second_call = walk_parent_tty_width();
         assert_eq!(first_call, second_call, "cache should return consistent results");
+    }
+
+    // ── schema guard tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn tool_adoption_stat_at_path_returns_none_for_missing_table() {
+        let temp_db = tempfile::NamedTempFile::new().unwrap();
+        let db_path = temp_db.path();
+
+        // Create a database with no tool_adoption_scores table
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute("CREATE TABLE dummy (id INTEGER)", [])
+            .unwrap();
+        drop(conn);
+
+        let result = tool_adoption_stat_at_path(db_path);
+        assert!(result.is_none(), "should return None when table is missing");
+    }
+
+    #[test]
+    fn canopy_unread_count_at_path_returns_none_for_missing_table() {
+        let temp_db = tempfile::NamedTempFile::new().unwrap();
+        let db_path = temp_db.path();
+
+        // Create a database with no notifications table
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute("CREATE TABLE dummy (id INTEGER)", [])
+            .unwrap();
+        drop(conn);
+
+        let result = canopy_unread_count_at_path(db_path);
+        assert!(result.is_none(), "should return None when table is missing");
+    }
+
+    // ── config error indicator tests ─────────────────────────────────────────
+
+    #[test]
+    fn config_error_segment_renders_cfg_indicator() {
+        let config = StatuslineConfig {
+            parse_error: true,
+            ..StatuslineConfig::default()
+        };
+
+        let segments = segments_from_config(&config);
+        assert_eq!(
+            segments.len(),
+            1,
+            "should have exactly one segment when parse_error is true"
+        );
+
+        let view = mock_statusline_view();
+        let rendered = segments[0].segment.render(&view, false);
+        assert_eq!(
+            rendered,
+            Some("[cfg!]".to_string()),
+            "config error segment should render [cfg!]"
+        );
+    }
+
+    #[test]
+    fn preview_config_error_segment_renders_cfg_indicator() {
+        let config = StatuslineConfig {
+            parse_error: true,
+            ..StatuslineConfig::default()
+        };
+
+        let segments = preview_segments_from_config(&config);
+        assert_eq!(
+            segments.len(),
+            1,
+            "should have exactly one segment when parse_error is true"
+        );
+
+        let view = mock_statusline_view();
+        let rendered = segments[0].segment.render(&view, false);
+        assert_eq!(
+            rendered,
+            Some("[cfg!]".to_string()),
+            "config error segment should render [cfg!]"
+        );
+    }
+
+    // ── unknown segment placeholder tests ────────────────────────────────────
+
+    #[test]
+    fn preview_segments_from_config_renders_unknown_placeholder() {
+        let mut config = StatuslineConfig::default();
+        config.segments = vec![SegmentEntry {
+            name: "definitely-not-a-real-segment".to_string(),
+            enabled: true,
+            color: None,
+            separator: None,
+        }];
+
+        let segments = preview_segments_from_config(&config);
+        assert_eq!(
+            segments.len(),
+            1,
+            "should have one segment for unknown name in preview"
+        );
+
+        let view = mock_statusline_view();
+        let rendered = segments[0].segment.render(&view, false);
+        assert_eq!(
+            rendered,
+            Some("[?definitely-not-a-real-segment]".to_string()),
+            "preview should render unknown placeholder"
+        );
+    }
+
+    #[test]
+    fn segments_from_config_drops_unknown_in_production() {
+        let mut config = StatuslineConfig::default();
+        config.segments = vec![SegmentEntry {
+            name: "definitely-not-a-real-segment".to_string(),
+            enabled: true,
+            color: None,
+            separator: None,
+        }];
+
+        let segments = segments_from_config(&config);
+        assert_eq!(
+            segments.len(),
+            0,
+            "should drop unknown segments in production"
+        );
     }
 }

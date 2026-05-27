@@ -112,6 +112,8 @@ pub struct StatuslineConfig {
     pub separator: SeparatorStyle,
     /// Session duration in hours for the blocks segment.
     pub session_duration_hours: Option<f64>,
+    /// Indicates whether the config file failed to parse.
+    pub parse_error: bool,
 }
 
 impl Default for StatuslineConfig {
@@ -130,6 +132,7 @@ impl Default for StatuslineConfig {
             provider: None,
             separator: SeparatorStyle::default(),
             session_duration_hours: None,
+            parse_error: false,
         }
     }
 }
@@ -203,11 +206,15 @@ pub fn load_config() -> StatuslineConfig {
                 provider: raw.provider,
                 separator: raw.separator,
                 session_duration_hours: raw.session_duration_hours,
+                parse_error: false,
             }
         }
         Err(e) => {
             eprintln!("annulus: failed to parse {}: {e}", path.display());
-            StatuslineConfig::default()
+            StatuslineConfig {
+                parse_error: true,
+                ..StatuslineConfig::default()
+            }
         }
     }
 }

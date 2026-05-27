@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -34,6 +34,21 @@ pub fn handle(poll: bool, system: bool) -> Result<()> {
 
     let conn = Connection::open(&db_path)?;
     conn.busy_timeout(Duration::from_millis(500))?;
+
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='notifications'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .is_some();
+    if !table_exists {
+        println!("canopy: notifications table not found");
+        return Ok(());
+    }
 
     // Query unread notifications
     let mut stmt = conn.prepare(
