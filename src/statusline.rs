@@ -402,7 +402,10 @@ pub fn handle_preview(no_color: bool, preview_all: bool) {
 ///
 /// A vector of `SessionBlock` structures sorted chronologically.
 #[allow(dead_code)]
-fn identify_session_blocks(entries: &[(SystemTime, u64)], duration_secs: u64) -> Option<Vec<SessionBlock>> {
+fn identify_session_blocks(
+    entries: &[(SystemTime, u64)],
+    duration_secs: u64,
+) -> Option<Vec<SessionBlock>> {
     if entries.is_empty() {
         return Some(vec![]);
     }
@@ -461,9 +464,7 @@ fn identify_session_blocks(entries: &[(SystemTime, u64)], duration_secs: u64) ->
     // Close the final block
     let final_block_end = current_block_start + Duration::from_secs(duration_secs);
     let now = SystemTime::now();
-    let time_since_last_entry = now
-        .duration_since(entries.last()?.0)
-        .unwrap_or_default();
+    let time_since_last_entry = now.duration_since(entries.last()?.0).unwrap_or_default();
     let is_active = time_since_last_entry.as_secs() < duration_secs && now < final_block_end;
 
     blocks.push(SessionBlock {
@@ -845,7 +846,9 @@ fn session_start_from_transcript(transcript_path: &str) -> Option<SystemTime> {
 
     for line in reader.lines().take(50) {
         let Ok(line) = line else { break };
-        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
         if let Some(ts) = v.get("timestamp").and_then(Value::as_str) {
             if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
                 if let Ok(secs) = u64::try_from(dt.timestamp()) {
@@ -4630,9 +4633,7 @@ mod tests {
             .unwrap()
             .with_timezone(&chrono::Utc);
         let system_time = result.unwrap();
-        let duration = system_time
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap();
+        let duration = system_time.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         let expected_duration = Duration::from_secs(expected.timestamp() as u64);
         // Allow 1 second tolerance for subsecond precision
         assert!(duration.as_secs().abs_diff(expected_duration.as_secs()) <= 1);
@@ -4656,9 +4657,7 @@ mod tests {
             .unwrap()
             .with_timezone(&chrono::Utc);
         let system_time = result.unwrap();
-        let duration = system_time
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap();
+        let duration = system_time.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         let expected_duration = Duration::from_secs(expected.timestamp() as u64);
         assert!(duration.as_secs().abs_diff(expected_duration.as_secs()) <= 1);
     }
@@ -4692,7 +4691,10 @@ mod tests {
         let result = session_start_from_transcript(transcript.to_str().unwrap());
         // Pre-epoch on line 1 must not abort the scan; the valid timestamp on line 2 should be found
         assert!(result.is_some());
-        let duration = result.unwrap().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let duration = result
+            .unwrap()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
         let expected = DateTime::parse_from_rfc3339("2025-06-01T10:00:00Z").unwrap();
         assert_eq!(duration.as_secs(), expected.timestamp() as u64);
     }
@@ -4705,7 +4707,10 @@ mod tests {
         // Call walk_parent_tty_width twice and verify both calls return the same cached value
         let first_call = walk_parent_tty_width();
         let second_call = walk_parent_tty_width();
-        assert_eq!(first_call, second_call, "cache should return consistent results");
+        assert_eq!(
+            first_call, second_call,
+            "cache should return consistent results"
+        );
     }
 
     // ── schema guard tests ───────────────────────────────────────────────────
@@ -4717,8 +4722,7 @@ mod tests {
 
         // Create a database with no tool_adoption_scores table
         let conn = Connection::open(db_path).unwrap();
-        conn.execute("CREATE TABLE dummy (id INTEGER)", [])
-            .unwrap();
+        conn.execute("CREATE TABLE dummy (id INTEGER)", []).unwrap();
         drop(conn);
 
         let result = tool_adoption_stat_at_path(db_path);
@@ -4732,8 +4736,7 @@ mod tests {
 
         // Create a database with no notifications table
         let conn = Connection::open(db_path).unwrap();
-        conn.execute("CREATE TABLE dummy (id INTEGER)", [])
-            .unwrap();
+        conn.execute("CREATE TABLE dummy (id INTEGER)", []).unwrap();
         drop(conn);
 
         let result = canopy_unread_count_at_path(db_path);
