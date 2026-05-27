@@ -1518,17 +1518,22 @@ enum HeartbeatStatus {
 }
 
 fn hyphae_db_path() -> PathBuf {
-    spore::paths::data_dir("hyphae").join("hyphae.db")
+    spore::paths::data_dir("hyphae")
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("hyphae.db")
 }
 
 fn canopy_db_path() -> PathBuf {
-    spore::paths::data_dir("canopy").join("canopy.db")
+    spore::paths::data_dir("canopy")
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("canopy.db")
 }
 
 fn heartbeat_path() -> PathBuf {
     std::env::var("CANOPY_HEARTBEAT_PATH").map_or_else(
         |_| {
             spore::paths::data_dir("basidiocarp")
+                .unwrap_or_else(|_| PathBuf::from("."))
                 .join("canopy")
                 .join("heartbeat.json")
         },

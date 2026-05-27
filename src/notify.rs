@@ -7,7 +7,7 @@ use std::time::Duration;
 type NotificationRow = (String, String, Option<String>, Option<String>, String);
 
 fn canopy_db_path() -> Option<PathBuf> {
-    let path = spore::paths::data_dir("canopy").join("canopy.db");
+    let path = spore::paths::data_dir("canopy").ok()?.join("canopy.db");
     path.exists().then_some(path)
 }
 
