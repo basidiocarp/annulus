@@ -40,7 +40,20 @@ pub struct BridgeState {
 pub fn bridge_path() -> PathBuf {
     match dirs::config_dir() {
         Some(config_dir) => config_dir.join("annulus").join("bridge.json"),
-        None => PathBuf::from("~/.config/annulus/bridge.json"),
+        None => bridge_path_home_fallback(),
+    }
+}
+
+// Fallback path when dirs::config_dir() returns None: $HOME/.config/annulus/bridge.json,
+// or /tmp/annulus-bridge.json when HOME is also absent.
+fn bridge_path_home_fallback() -> PathBuf {
+    bridge_path_from_home(std::env::var("HOME").ok().as_deref())
+}
+
+fn bridge_path_from_home(home: Option<&str>) -> PathBuf {
+    match home {
+        Some(h) => PathBuf::from(h).join(".config/annulus/bridge.json"),
+        None => PathBuf::from("/tmp/annulus-bridge.json"),
     }
 }
 
@@ -134,5 +147,20 @@ mod tests {
         let state = read_bridge(temp.path());
         assert_eq!(state.entries.len(), 1);
         assert_eq!(state.entries[0].key, "permanent");
+    }
+
+    #[test]
+    fn bridge_path_from_home_builds_config_path() {
+        let path = bridge_path_from_home(Some("/fake/home"));
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/fake/home/.config/annulus/bridge.json"),
+        );
+    }
+
+    #[test]
+    fn bridge_path_from_home_falls_back_to_tmp_when_absent() {
+        let path = bridge_path_from_home(None);
+        assert_eq!(path, std::path::PathBuf::from("/tmp/annulus-bridge.json"));
     }
 }
