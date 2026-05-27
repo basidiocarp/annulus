@@ -28,7 +28,7 @@ terminal_size = "0.4"
 toml = "1"
 tracing = "0.1"
 which = "7"
-spore = { git = "https://github.com/basidiocarp/spore", rev = "967e10c43a1052c9e57e226227621a83e6ac20e4" }
+spore = { git = "https://github.com/basidiocarp/spore", rev = "85414a54afc16597297f6cd42edec5985474d767" }
 
 [target.'cfg(any(windows, target_env = "musl"))'.dependencies]
 rusqlite = { version = "0.39", features = ["bundled"] }
