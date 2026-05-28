@@ -2,7 +2,9 @@ use std::io::{self, BufRead, BufReader, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
+#[cfg(unix)]
+use std::time::Instant;
 
 use anyhow::Result;
 use chrono::DateTime;
@@ -16,6 +18,7 @@ use crate::providers;
 
 const TIERED_PRICING_THRESHOLD: usize = 200_000;
 const DEFAULT_TERMINAL_WIDTH: u16 = 80;
+#[cfg(unix)]
 const MAX_PARENT_WALK: u8 = 8;
 const CACHE_TTL_SECS: u64 = 30;
 // Sentinel files older than this are treated as stale even when is_updating=true,
