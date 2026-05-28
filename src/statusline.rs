@@ -2526,6 +2526,7 @@ impl Segment for BlocksSegment {
 /// is the correct path. This helper exists only so tests can obtain a concrete segment vec without
 /// constructing a full config.
 #[cfg(test)]
+#[allow(clippy::too_many_lines)]
 fn default_segments() -> Vec<ConfiguredSegment> {
     vec![
         ConfiguredSegment {
@@ -4622,6 +4623,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_sign_loss)]
     fn session_start_from_transcript_valid_rfc3339_first_line() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let transcript = temp_dir.path().join("valid.jsonl");
@@ -4645,6 +4647,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_sign_loss)]
     fn session_start_from_transcript_scans_second_line_with_no_timestamp_first() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let transcript = temp_dir.path().join("scan.jsonl");
@@ -4684,6 +4687,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_sign_loss)]
     fn session_start_from_transcript_pre_epoch_on_first_line_still_finds_later_valid_timestamp() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let transcript = temp_dir.path().join("pre-epoch-then-valid.jsonl");
@@ -4799,6 +4803,7 @@ mod tests {
     // ── unknown segment placeholder tests ────────────────────────────────────
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn preview_segments_from_config_renders_unknown_placeholder() {
         let mut config = StatuslineConfig::default();
         config.segments = vec![SegmentEntry {
@@ -4825,6 +4830,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn segments_from_config_drops_unknown_in_production() {
         let mut config = StatuslineConfig::default();
         config.segments = vec![SegmentEntry {
