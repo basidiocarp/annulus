@@ -2,9 +2,9 @@ use std::io::{self, BufRead, BufReader, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime};
 #[cfg(unix)]
 use std::time::Instant;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use chrono::DateTime;
