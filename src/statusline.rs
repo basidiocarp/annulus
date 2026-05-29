@@ -3594,7 +3594,6 @@ mod tests {
             savings.value.as_ref().unwrap()["saved_tokens"].as_u64(),
             Some(45_000)
         );
-
     }
 
     #[test]
