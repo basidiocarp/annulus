@@ -2030,7 +2030,13 @@ impl Segment for ContextSegment {
     }
     fn render(&self, view: &StatuslineView, color: bool) -> Option<String> {
         let context = match view.context_pct {
-            Some(pct) => format!("ctx: ▲ {pct}%"),
+            Some(pct) => {
+                if pct >= 85 {
+                    format!("ctx: ▲ {pct}%")
+                } else {
+                    format!("ctx: {pct}%")
+                }
+            }
             None => "ctx: --".to_string(),
         };
         let context_code = match view.context_pct {
@@ -2199,7 +2205,7 @@ impl Segment for ContextMetricsSegment {
             // window_pct is 0–100; truncation and sign loss are not possible here.
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let pct = (metrics.window_pct * 100.0).round() as u32 / 100;
-            paint(&format!("ctx {pct}%"), color_code, color)
+            paint(&format!("session: {pct}%"), color_code, color)
         })
     }
 }
@@ -2532,15 +2538,6 @@ impl Segment for BlocksSegment {
 #[allow(clippy::too_many_lines)]
 fn default_segments() -> Vec<ConfiguredSegment> {
     vec![
-        ConfiguredSegment {
-            segment: Box::new(ContextSegment),
-            entry: SegmentEntry {
-                name: "context".to_string(),
-                enabled: true,
-                color: None,
-                separator: None,
-            },
-        },
         ConfiguredSegment {
             segment: Box::new(UsageSegment),
             entry: SegmentEntry {
@@ -3288,7 +3285,7 @@ mod tests {
         );
 
         // Note: degradation segment is included if unavailable tools are detected
-        assert!(line.contains("ctx: ▲ 42%"));
+        assert!(line.contains("session: 42%"));
         assert!(line.contains("sonnet 4.6"));
         assert!(line.contains("↓8.2K saved"));
         assert!(line.contains("git: main"));
@@ -3320,7 +3317,6 @@ mod tests {
         );
 
         // Note: degradation segment is included if unavailable tools are detected
-        assert!(line.contains("ctx: --"));
         assert!(line.contains("unknown"));
     }
 
@@ -3551,7 +3547,6 @@ mod tests {
         assert!(payload.segments.len() >= 10);
 
         let segment_names: Vec<&str> = payload.segments.iter().map(|s| s.name.as_str()).collect();
-        assert!(segment_names.contains(&"context"));
         assert!(segment_names.contains(&"usage"));
         assert!(segment_names.contains(&"cost"));
         assert!(segment_names.contains(&"model"));
@@ -3600,12 +3595,6 @@ mod tests {
             Some(45_000)
         );
 
-        let context = find("context");
-        assert!(context.available);
-        assert_eq!(
-            context.value.as_ref().unwrap()["percent"].as_u64(),
-            Some(67)
-        );
     }
 
     #[test]
@@ -3627,15 +3616,6 @@ mod tests {
         };
         let config = StatuslineConfig::default();
         let payload = build_json_payload(&view, &config);
-
-        let context_segment = payload
-            .segments
-            .iter()
-            .find(|s| s.name == "context")
-            .unwrap();
-        assert!(!context_segment.available);
-        assert!(context_segment.reason.is_some());
-        assert!(context_segment.value.is_none());
 
         let branch_segment = payload
             .segments
@@ -3781,7 +3761,7 @@ mod tests {
         };
         let segment = ContextMetricsSegment;
         let output = segment.render(&view, false).unwrap();
-        assert!(output.contains("ctx"));
+        assert!(output.contains("session:"));
         assert!(output.contains("42%"));
     }
 

@@ -50,7 +50,6 @@ pub const ALL_SEGMENT_NAMES: &[&str] = &[
 ];
 
 const DEFAULT_SEGMENTS: &[&str] = &[
-    "context",
     "usage",
     "cost",
     "model",
@@ -243,13 +242,12 @@ mod tests {
     #[test]
     fn test_default_config_has_all_segments() {
         let config = StatuslineConfig::default();
-        assert_eq!(config.segments.len(), 12);
+        assert_eq!(config.segments.len(), 11);
         assert!(config.segments.iter().all(|s| s.enabled));
         let names: Vec<_> = config.segments.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
             names,
             vec![
-                "context",
                 "usage",
                 "cost",
                 "model",
@@ -269,7 +267,7 @@ mod tests {
     #[test]
     fn test_load_config_missing_file_returns_defaults() {
         let config = load_config();
-        assert_eq!(config.segments.len(), 12);
+        assert_eq!(config.segments.len(), 11);
         assert!(config.segments.iter().all(|s| s.enabled));
     }
 
@@ -304,7 +302,7 @@ sonnet = 250000
         let result = toml::from_str::<RawConfig>(malformed);
         assert!(result.is_err());
         let config = load_config();
-        assert_eq!(config.segments.len(), 12);
+        assert_eq!(config.segments.len(), 11);
     }
 
     #[test]

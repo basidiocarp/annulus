@@ -72,7 +72,7 @@ mod tests {
         let export = build_export(&config);
 
         assert_eq!(export.schema_version, "1.0");
-        assert!(export.segments.iter().any(|s| s.id == "context"));
+        assert!(export.segments.iter().any(|s| s.id == "usage"));
         assert!(export.segments.iter().all(|s| s.enabled));
         assert_eq!(export.theme.color_mode, "auto");
         assert_eq!(export.theme.separator, " | ");
