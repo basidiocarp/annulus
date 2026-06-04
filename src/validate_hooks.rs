@@ -241,8 +241,11 @@ pub fn run() -> Result<()> {
         .cloned()
         .collect();
 
+    // Stream split: stdout carries only resolved/registered paths (machine-consumable,
+    // one per line); all human-readable prose — headers, labels, summary, and the
+    // empty/error notices — goes to stderr so callers can parse stdout without prose.
     if existing_files.is_empty() {
-        println!("No Claude Code settings files found.");
+        eprintln!("No Claude Code settings files found.");
         return Ok(());
     }
 
@@ -254,7 +257,7 @@ pub fn run() -> Result<()> {
     let broken_count = 0;
 
     for settings_path in &existing_files {
-        println!("Checking {}...", settings_path.display());
+        eprintln!("Checking {}...", settings_path.display());
 
         let entries = match parse_hook_entries(settings_path) {
             Ok(entries) => entries,
@@ -266,7 +269,7 @@ pub fn run() -> Result<()> {
         };
 
         if entries.is_empty() {
-            println!("  (no hook commands found)");
+            eprintln!("  (no hook commands found)");
             continue;
         }
 
@@ -277,37 +280,43 @@ pub fn run() -> Result<()> {
                 // No file-extension path found; check if the command is a bare binary on PATH.
                 if let Some(cmd) = extract_bare_command(&command) {
                     if let Some(found_at) = find_command_on_path(cmd) {
-                        println!(
+                        // Resolved binary path → stdout; diagnostic label → stderr.
+                        println!("{}", found_at.display());
+                        eprintln!(
                             "  [OK]    {event} → {command} ({cmd} at {})",
                             found_at.display()
                         );
                     } else {
-                        println!("  [WARN]  {event} → {command} ({cmd} not found on PATH)");
+                        // Unresolved binary: no path to emit, warning only.
+                        eprintln!("  [WARN]  {event} → {command} ({cmd} not found on PATH)");
                         stale_count += 1;
                         any_failed = true;
                     }
                 } else {
-                    // Cannot determine binary; skip silently.
-                    println!("  [OK]    {event} → {command}");
+                    // Cannot determine binary; no resolved path to emit.
+                    eprintln!("  [OK]    {event} → {command}");
                 }
                 continue;
             }
 
             for path in paths {
+                // The registered path is always emitted to stdout so callers see what
+                // was configured, even when stale or broken; the label lands on stderr.
+                println!("{}", path.display());
                 let status = validate_hook_path(&path);
 
                 match status {
                     ValidationStatus::Ok => {
-                        println!("  [OK]      {event} → {command}");
+                        eprintln!("  [OK]      {event} → {command}");
                     }
                     ValidationStatus::Stale => {
-                        println!("  [STALE]   {event} → {command} (not found)");
+                        eprintln!("  [STALE]   {event} → {command} (not found)");
                         stale_count += 1;
                         any_failed = true;
                     }
                     #[cfg(unix)]
                     ValidationStatus::Broken => {
-                        println!("  [BROKEN]  {event} → {command} (not executable)");
+                        eprintln!("  [BROKEN]  {event} → {command} (not executable)");
                         broken_count += 1;
                         any_failed = true;
                     }
@@ -317,7 +326,7 @@ pub fn run() -> Result<()> {
     }
 
     if stale_count > 0 || broken_count > 0 {
-        println!(
+        eprintln!(
             "\n{} file{} checked, {} stale, {} broken",
             existing_files.len(),
             if existing_files.len() == 1 { "" } else { "s" },
@@ -325,7 +334,7 @@ pub fn run() -> Result<()> {
             broken_count
         );
     } else {
-        println!(
+        eprintln!(
             "\n{} file{} checked, all hooks valid",
             existing_files.len(),
             if existing_files.len() == 1 { "" } else { "s" }
