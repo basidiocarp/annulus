@@ -144,6 +144,8 @@ struct StatuslineView {
     terminal_width: u16,
     session_start: Option<SystemTime>,
     session_duration_hours: f64,
+    currency_symbol: Option<String>,
+    currency_conversion_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -507,6 +509,8 @@ fn mock_statusline_view() -> StatuslineView {
         terminal_width: 120,
         session_start: Some(SystemTime::now()),
         session_duration_hours: DEFAULT_SESSION_DURATION_HOURS,
+        currency_symbol: None,
+        currency_conversion_rate: None,
     }
 }
 
@@ -1021,6 +1025,8 @@ fn statusline_view(input: StatuslineInput, config: &StatuslineConfig) -> Statusl
         session_duration_hours: config
             .session_duration_hours
             .unwrap_or(DEFAULT_SESSION_DURATION_HOURS),
+        currency_symbol: config.currency_symbol.clone(),
+        currency_conversion_rate: config.currency_conversion_rate,
     }
 }
 
@@ -2080,9 +2086,15 @@ impl Segment for CostSegment {
         1
     }
     fn render(&self, view: &StatuslineView, color: bool) -> Option<String> {
-        let cost = view
-            .cost
-            .map_or_else(|| "--".to_string(), |cost| format!("${cost:.2}"));
+        let cost = view.cost.map_or_else(
+            || "--".to_string(),
+            |cost| {
+                let symbol = view.currency_symbol.as_deref().unwrap_or("$");
+                let rate = view.currency_conversion_rate.unwrap_or(1.0);
+                let converted_cost = cost * rate;
+                format!("{symbol}{converted_cost:.2}")
+            },
+        );
         Some(paint(&cost, "35", color))
     }
 }
@@ -3278,6 +3290,8 @@ mod tests {
                 terminal_width: 80,
                 session_start: None,
                 session_duration_hours: DEFAULT_SESSION_DURATION_HOURS,
+                currency_symbol: None,
+                currency_conversion_rate: None,
             },
             false,
             &segments,
@@ -3310,6 +3324,8 @@ mod tests {
                 terminal_width: 80,
                 session_start: None,
                 session_duration_hours: DEFAULT_SESSION_DURATION_HOURS,
+                currency_symbol: None,
+                currency_conversion_rate: None,
             },
             false,
             &segments,
@@ -3464,6 +3480,8 @@ mod tests {
             terminal_width: 80,
             session_start: None,
             session_duration_hours: DEFAULT_SESSION_DURATION_HOURS,
+            currency_symbol: None,
+            currency_conversion_rate: None,
         }
     }
 
@@ -3512,6 +3530,20 @@ mod tests {
     }
 
     #[test]
+    fn cost_segment_applies_currency_symbol_and_conversion_rate() {
+        let view = StatuslineView {
+            cost: Some(2.00),
+            currency_symbol: Some("€".to_string()),
+            currency_conversion_rate: Some(0.85),
+            ..default_view()
+        };
+        let segment = CostSegment;
+        let output = segment.render(&view, false).unwrap();
+        // 2.00 * 0.85 = 1.70, rendered with the configured symbol at two decimals.
+        assert_eq!(output, "€1.70");
+    }
+
+    #[test]
     fn json_payload_includes_all_enabled_segments() {
         let view = StatuslineView {
             context_pct: Some(67),
@@ -3538,6 +3570,8 @@ mod tests {
             terminal_width: 80,
             session_start: None,
             session_duration_hours: DEFAULT_SESSION_DURATION_HOURS,
+            currency_symbol: None,
+            currency_conversion_rate: None,
         };
         let config = StatuslineConfig::default();
         let payload = build_json_payload(&view, &config);
@@ -3612,6 +3646,8 @@ mod tests {
             terminal_width: 80,
             session_start: None,
             session_duration_hours: DEFAULT_SESSION_DURATION_HOURS,
+            currency_symbol: None,
+            currency_conversion_rate: None,
         };
         let config = StatuslineConfig::default();
         let payload = build_json_payload(&view, &config);

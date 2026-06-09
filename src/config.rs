@@ -99,6 +99,12 @@ struct RawConfig {
     /// Session duration in hours for the blocks segment.
     #[serde(default)]
     session_duration_hours: Option<f64>,
+    /// Currency symbol for cost display (defaults to "$" when None).
+    #[serde(default)]
+    currency_symbol: Option<String>,
+    /// Conversion rate for cost display (defaults to 1.0 when None).
+    #[serde(default)]
+    currency_conversion_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +117,10 @@ pub struct StatuslineConfig {
     pub separator: SeparatorStyle,
     /// Session duration in hours for the blocks segment.
     pub session_duration_hours: Option<f64>,
+    /// Currency symbol for cost display (defaults to "$" when None).
+    pub currency_symbol: Option<String>,
+    /// Conversion rate for cost display (defaults to 1.0 when None).
+    pub currency_conversion_rate: Option<f64>,
     /// Indicates whether the config file failed to parse.
     pub parse_error: bool,
 }
@@ -131,6 +141,8 @@ impl Default for StatuslineConfig {
             provider: None,
             separator: SeparatorStyle::default(),
             session_duration_hours: None,
+            currency_symbol: None,
+            currency_conversion_rate: None,
             parse_error: false,
         }
     }
@@ -205,6 +217,8 @@ pub fn load_config() -> StatuslineConfig {
                 provider: raw.provider,
                 separator: raw.separator,
                 session_duration_hours: raw.session_duration_hours,
+                currency_symbol: raw.currency_symbol,
+                currency_conversion_rate: raw.currency_conversion_rate,
                 parse_error: false,
             }
         }
