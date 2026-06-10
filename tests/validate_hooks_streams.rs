@@ -4,6 +4,13 @@
 //! stderr carries all human-readable prose (labels, summaries), and the process
 //! exits 1 when any hook is stale or broken. This contract is depended on by
 //! external scripts that parse stdout.
+//!
+//! Unix-only: the harness controls which `settings.json` the binary reads by
+//! overriding `$HOME`, but `dirs::home_dir()` consults the profile known-folder
+//! API on Windows and ignores `$HOME`, so the fixture cannot be deterministically
+//! targeted there. Windows integration coverage is tracked as a follow-up
+//! (`.handoffs/proposals/annulus/validate-hooks-broken-and-windows-coverage.md`).
+#![cfg(unix)]
 
 use std::fs;
 use std::path::PathBuf;
